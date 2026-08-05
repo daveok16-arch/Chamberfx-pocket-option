@@ -259,7 +259,9 @@ async def main():
     
     load_dotenv()
     
-    TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8214823027:AAFecgXUdvfnI9uPhvDD7wmE26N9DWZmpzs")
+    TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+    if not TELEGRAM_TOKEN:
+        raise ValueError("TELEGRAM_TOKEN environment variable is required")
     
     engine = TradingEngine(
         telegram_token=TELEGRAM_TOKEN,
