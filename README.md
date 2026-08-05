@@ -141,8 +141,8 @@ LOG_LEVEL=INFO
 ### Docker
 
 ```bash
-# Build image
-docker build -t chamberfx-bot ./python-bot
+# Build image (from repository root)
+docker build -t chamberfx-bot .
 
 # Run container
 docker run -d \
@@ -155,7 +155,11 @@ docker run -d \
 ### Docker Compose
 
 ```bash
-cd python-bot
+# Create .env file
+cp .env.example .env
+# Edit .env with your credentials
+
+# Start the bot
 docker-compose up -d
 ```
 
