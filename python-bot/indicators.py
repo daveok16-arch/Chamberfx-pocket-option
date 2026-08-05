@@ -1,8 +1,9 @@
 """
 Technical Indicators Pipeline
 ============================
-Calculates EMA, RSI, MACD, Bollinger Bands using pandas-ta.
+Calculates EMA, RSI, MACD, Bollinger Bands using pure Python/NumPy.
 Designed to work with Tick-Volume Bars for reduced lag.
+No external indicator libraries required.
 """
 
 import pandas as pd
@@ -57,7 +58,8 @@ class IndicatorResult:
 class TechnicalIndicatorPipeline:
     """
     Calculates technical indicators from Tick-Volume Bars.
-    Uses pandas-ta for efficient indicator computation.
+    Uses pure Python/NumPy for indicator computation.
+    No pandas-ta dependency.
     """
     
     def __init__(
@@ -89,14 +91,6 @@ class TechnicalIndicatorPipeline:
         self.bb_std = bb_std
         self.adx_period = adx_period
         self.atr_period = atr_period
-        
-        # Import pandas_ta
-        try:
-            import pandas_ta as ta
-            self.ta = ta
-        except ImportError:
-            self.ta = None
-            print("Warning: pandas_ta not installed. Using manual calculations.")
     
     def calculate(self, bars: List[TickVolumeBar]) -> Optional[IndicatorResult]:
         """
@@ -177,27 +171,21 @@ class TechnicalIndicatorPipeline:
         return pd.DataFrame(data)
     
     def _calculate_ema(self, df: pd.DataFrame) -> Tuple[float, float, float]:
-        """Calculate EMA values."""
+        """Calculate EMA values using manual calculation."""
         closes = df['close'].values
         
         if len(closes) < self.ema_trend:
             return closes[-1] if len(closes) > 0 else 0
         
-        if self.ta:
-            # Using pandas_ta
-            ema9 = self.ta.ema(closes, length=self.ema_fast)
-            ema21 = self.ta.ema(closes, length=self.ema_slow)
-            ema50 = self.ta.ema(closes, length=self.ema_trend)
-        else:
-            # Manual EMA calculation
-            ema9 = self._manual_ema(closes, self.ema_fast)
-            ema21 = self._manual_ema(closes, self.ema_slow)
-            ema50 = self._manual_ema(closes, self.ema_trend)
+        # Manual EMA calculation
+        ema9 = self._manual_ema(closes, self.ema_fast)
+        ema21 = self._manual_ema(closes, self.ema_slow)
+        ema50 = self._manual_ema(closes, self.ema_trend)
         
         return (
-            float(ema9[-1] if hasattr(ema9, '__len__') else ema9),
-            float(ema21[-1] if hasattr(ema21, '__len__') else ema21),
-            float(ema50[-1] if hasattr(ema50, '__len__') else ema50)
+            float(ema9[-1]),
+            float(ema21[-1]),
+            float(ema50[-1])
         )
     
     def _manual_ema(self, data: np.ndarray, period: int) -> np.ndarray:
@@ -212,17 +200,13 @@ class TechnicalIndicatorPipeline:
         return ema
     
     def _calculate_rsi(self, df: pd.DataFrame) -> float:
-        """Calculate RSI."""
+        """Calculate RSI using manual calculation."""
         closes = df['close'].values
         
         if len(closes) < self.rsi_period + 1:
             return 50.0
         
-        if self.ta:
-            rsi = self.ta.rsi(closes, length=self.rsi_period)
-            return float(rsi[-1] if hasattr(rsi, '__len__') else rsi)
-        
-        # Manual RSI
+        # Manual RSI calculation
         deltas = np.diff(closes)
         gains = np.where(deltas > 0, deltas, 0)
         losses = np.where(deltas < 0, -deltas, 0)
@@ -241,71 +225,40 @@ class TechnicalIndicatorPipeline:
     def _calculate_macd(
         self, df: pd.DataFrame
     ) -> Tuple[float, float, float]:
-        """Calculate MACD."""
+        """Calculate MACD using manual calculation."""
         closes = df['close'].values
         
         if len(closes) < self.macd_slow + self.macd_signal:
             return 0.0, 0.0, 0.0
         
-        if self.ta:
-            macd = self.ta.macd(
-                closes,
-                fast=self.macd_fast,
-                slow=self.macd_slow,
-                signal=self.macd_signal
-            )
-            if hasattr(macd, 'values'):
-                macd_df = macd
-            else:
-                macd_df = pd.DataFrame(macd)
-            
-            macd_line = float(macd_df.iloc[-1, 0]) if len(macd_df) > 0 else 0
-            macd_signal = float(macd_df.iloc[-1, 1]) if len(macd_df) > 0 else 0
-            macd_histogram = float(macd_df.iloc[-1, 2]) if len(macd_df) > 0 else 0
-        else:
-            # Manual MACD
-            ema_fast = self._manual_ema(closes, self.macd_fast)
-            ema_slow = self._manual_ema(closes, self.macd_slow)
-            macd_line = ema_fast[-1] - ema_slow[-1]
-            
-            # Signal line (EMA of MACD line)
-            macd_line_arr = np.array([macd_line])
-            macd_signal = self._manual_ema(macd_line_arr, self.macd_signal)[-1]
-            macd_histogram = macd_line - macd_signal
+        # Manual MACD calculation
+        ema_fast = self._manual_ema(closes, self.macd_fast)
+        ema_slow = self._manual_ema(closes, self.macd_slow)
+        macd_line = ema_fast[-1] - ema_slow[-1]
+        
+        # Signal line (EMA of MACD line)
+        macd_line_arr = np.array([macd_line])
+        macd_signal = self._manual_ema(macd_line_arr, self.macd_signal)[-1]
+        macd_histogram = macd_line - macd_signal
         
         return macd_line, macd_signal, macd_histogram
     
     def _calculate_bb(
         self, df: pd.DataFrame
     ) -> Tuple[float, float, float, float]:
-        """Calculate Bollinger Bands and position."""
+        """Calculate Bollinger Bands and position using manual calculation."""
         closes = df['close'].values
         
         if len(closes) < self.bb_period:
             return closes[-1], closes[-1], closes[-1], 50.0
         
-        if self.ta:
-            bb = self.ta.bbands(
-                closes,
-                length=self.bb_period,
-                std=self.bb_std
-            )
-            if hasattr(bb, 'values'):
-                bb_df = bb
-            else:
-                bb_df = pd.DataFrame(bb)
-            
-            bb_upper = float(bb_df.iloc[-1, 0]) if len(bb_df) > 0 else closes[-1]
-            bb_middle = float(bb_df.iloc[-1, 1]) if len(bb_df) > 0 else closes[-1]
-            bb_lower = float(bb_df.iloc[-1, 2]) if len(bb_df) > 0 else closes[-1]
-        else:
-            # Manual Bollinger Bands
-            sma = np.mean(closes[-self.bb_period:])
-            std = np.std(closes[-self.bb_period:])
-            
-            bb_middle = sma
-            bb_upper = sma + (std * self.bb_std)
-            bb_lower = sma - (std * self.bb_std)
+        # Manual Bollinger Bands calculation
+        sma = np.mean(closes[-self.bb_period:])
+        std = np.std(closes[-self.bb_period:])
+        
+        bb_middle = sma
+        bb_upper = sma + (std * self.bb_std)
+        bb_lower = sma - (std * self.bb_std)
         
         # Calculate position (0-100)
         current = closes[-1]
@@ -317,7 +270,7 @@ class TechnicalIndicatorPipeline:
         return bb_upper, bb_middle, bb_lower, float(bb_position)
     
     def _calculate_adx(self, df: pd.DataFrame) -> float:
-        """Calculate ADX."""
+        """Calculate ADX using simplified manual calculation."""
         highs = df['high'].values
         lows = df['low'].values
         closes = df['close'].values
@@ -325,15 +278,18 @@ class TechnicalIndicatorPipeline:
         if len(closes) < self.adx_period + 1:
             return 25.0
         
-        if self.ta:
-            adx = self.ta.adx(closes, highs, lows, length=self.adx_period)
-            return float(adx[-1] if hasattr(adx, '__len__') else adx)
+        # Simplified ADX approximation based on price momentum
+        returns = np.diff(closes)
+        positive_closes = np.sum(returns > 0)
+        total_closes = len(returns)
         
-        # Simplified ADX approximation
-        return 25.0
+        # Simple trend strength indicator
+        adx = abs(positive_closes / total_closes - 0.5) * 100 + 25
+        
+        return min(max(float(adx), 0), 100)
     
     def _calculate_atr(self, df: pd.DataFrame) -> float:
-        """Calculate ATR."""
+        """Calculate ATR using manual calculation."""
         highs = df['high'].values
         lows = df['low'].values
         closes = df['close'].values
@@ -341,11 +297,7 @@ class TechnicalIndicatorPipeline:
         if len(closes) < self.atr_period + 1:
             return 0.0
         
-        if self.ta:
-            atr = self.ta.atr(highs, lows, closes, length=self.atr_period)
-            return float(atr[-1] if hasattr(atr, '__len__') else atr)
-        
-        # Manual ATR
+        # Manual ATR calculation
         tr = np.maximum(
             highs[1:] - lows[1:],
             np.maximum(
