@@ -110,7 +110,7 @@ class TradingEngine:
         self._trade_history: List[TradeResult] = []
         
         # Callbacks
-        self._on_signal: Optional[Callable[[TradingSignal], Awaitable None]] = None
+        self._on_signal: Optional[Callable[[TradingSignal], Awaitable[None]]] = None
     
     @property
     def connected(self) -> bool:
@@ -119,7 +119,7 @@ class TradingEngine:
     
     def set_signal_callback(
         self, 
-        callback: Callable[[TradingSignal], Awaitable None]
+        callback: Callable[[TradingSignal], Awaitable[None]]
     ) -> None:
         """Set callback for new signals."""
         self._on_signal = callback
