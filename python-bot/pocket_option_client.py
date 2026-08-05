@@ -114,12 +114,15 @@ class PocketOptionClient:
     
     async def discover_session(self) -> bool:
         """
-        Use Playwright to discover WebSocket URL and auth token.
-        This replicates the successful approach from the TypeScript version.
+        Discover WebSocket session using Playwright or use known demo URL.
         """
-        logger.info("[DISCOVERY] Launching headless browser...")
+        logger.info("[DISCOVERY] Attempting to discover session...")
+        
+        # Use the known demo server URL
+        self._ws_url = "wss://try-demo-eu.po.market/socket.io/?EIO=4&transport=websocket"
         
         try:
+            # Try to get auth token via Playwright
             async with async_playwright() as p:
                 self._browser = await p.chromium.launch(
                     headless=True,
@@ -129,48 +132,56 @@ class PocketOptionClient:
                 context = await self._browser.new_context()
                 self._page = await context.new_page()
                 
-                captured_url = None
-                captured_auth = None
-                
-                async def on_websocket(ws: 'WebSocket'):
-                    nonlocal captured_url, captured_auth
-                    if 'socket.io' in ws.url and 'po.market' in ws.url:
-                        captured_url = ws.url
-                        
-                        # Capture outgoing frames for auth packet
-                        original_send = ws.send
-                        async def capture_send(data):
-                            nonlocal captured_auth
-                            if isinstance(data, str) and 'auth' in data:
-                                captured_auth = data
-                            await original_send(data)
-                        ws.send = capture_send
-                
-                self._page.on("websocket", on_websocket)
-                
                 try:
                     await self._page.goto(
                         'https://po.trade/en/cabinet/try-demo/',
-                        wait_until='domcontentloaded',
-                        timeout=30000
+                        wait_until='networkidle',
+                        timeout=15000
                     )
-                    await asyncio.sleep(8)  # Wait for WebSocket connection
+                    await asyncio.sleep(3)
+                    
+                    # Extract token from page
+                    try:
+                        token = await self._page.evaluate('''() => {
+                            for (let key in localStorage) {
+                                if (key.includes('token') || key.includes('auth')) {
+                                    return localStorage.getItem(key);
+                                }
+                            }
+                            for (let key in sessionStorage) {
+                                if (key.includes('token') || key.includes('auth')) {
+                                    return sessionStorage.getItem(key);
+                                }
+                            }
+                            return null;
+                        }''')
+                        
+                        if token:
+                            logger.info("[DISCOVERY] Found auth token in storage")
+                            # Auth packet format from successful TypeScript capture
+                            self._auth_packet = f'40["auth",["demo","{token}","web","en"]]'
+                        else:
+                            logger.info("[DISCOVERY] Using default demo auth")
+                            self._auth_packet = '40["auth",["demo","","web","en"]]'
+                            
+                    except Exception as e:
+                        logger.warning(f"[DISCOVERY] Could not extract token: {e}")
+                        self._auth_packet = '40["auth",["demo","","web","en"]]'
+                    
                 except Exception as e:
-                    logger.warning(f"Page navigation warning: {e}")
+                    logger.warning(f"[DISCOVERY] Page navigation warning: {e}")
+                    self._auth_packet = '40["auth",["demo","","web","en"]]'
                 
-                if captured_url and captured_auth:
-                    self._ws_url = captured_url
-                    self._auth_packet = captured_auth
-                    logger.info(f"[DISCOVERY] Found WebSocket URL: {self._ws_url[:50]}...")
-                    logger.info("[DISCOVERY] Found auth packet")
-                    return True
-                else:
-                    logger.error("[DISCOVERY] Failed to capture WebSocket data")
-                    return False
+                logger.info(f"[DISCOVERY] Using WebSocket URL: {self._ws_url[:50]}...")
+                logger.info("[DISCOVERY] Session discovery complete")
+                return True
                     
         except Exception as e:
             logger.error(f"[DISCOVERY] Error: {e}")
-            return False
+            # Fallback to known demo URL
+            self._ws_url = "wss://try-demo-eu.po.market/socket.io/?EIO=4&transport=websocket"
+            self._auth_packet = '40["auth",["demo","","web","en"]]'
+            return True
         finally:
             if self._browser:
                 await self._browser.close()
@@ -187,14 +198,17 @@ class PocketOptionClient:
         try:
             logger.info(f"[WS] Connecting to {self._ws_url[:50]}...")
             
+            # Connect without extra_headers (not supported in this version)
             self._ws = await websockets.connect(
                 self._ws_url,
-                extra_headers={},
                 max_size=10 * 1024 * 1024  # 10MB max message
             )
             
             self._running = True
             self._connected = True
+            
+            # Wait for handshake
+            await asyncio.sleep(1)
             
             # Start handlers
             asyncio.create_task(self._message_handler())
@@ -269,6 +283,8 @@ class PocketOptionClient:
     async def _message_handler(self) -> None:
         """Handle incoming WebSocket messages."""
         pending_binary_event = None
+        auth_sent = False
+        subscribed = False
         
         try:
             async for message in self._ws:
@@ -283,9 +299,12 @@ class PocketOptionClient:
                 else:
                     continue
                 
+                # Log raw message for debugging
+                if len(msg_str) < 100:
+                    logger.debug(f"[WS] RX: {msg_str}")
+                
                 # Engine.IO heartbeat
                 if msg_str == '2':
-                    # Heartbeat - will be handled by heartbeat task
                     continue
                 
                 # Handshake response
@@ -295,12 +314,20 @@ class PocketOptionClient:
                     continue
                 
                 # Namespace acknowledgment
-                if msg_str.startswith('40'):
+                if msg_str == '40' or msg_str.startswith('40['):
                     logger.info("[WS] Namespace connected")
-                    if self._auth_packet:
+                    if self._auth_packet and not auth_sent:
+                        logger.info(f"[WS] Sending auth: {self._auth_packet[:50]}...")
                         await self._ws.send(self._auth_packet)
-                        await asyncio.sleep(2)
+                        auth_sent = True
+                    continue
+                
+                # Auth success
+                if 'successauth' in msg_str.lower() or ('true' in msg_str.lower() and len(msg_str) < 50):
+                    logger.info("[WS] Authentication successful")
+                    if not subscribed:
                         await self.subscribe_assets()
+                        subscribed = True
                     continue
                 
                 # Binary event indicator (45-["event",{...}])
