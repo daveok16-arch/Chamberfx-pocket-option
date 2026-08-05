@@ -17,6 +17,8 @@ services:
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
+      - key: TELEGRAM_WEBHOOK_URL
+        sync: false
       - key: LOG_LEVEL
         value: INFO
       - key: MIN_CONFIDENCE

@@ -298,8 +298,8 @@ class TelegramTradingBot:
     def connected(self) -> bool:
         return self._connected
     
-    async def start(self) -> None:
-        """Initialize and start the bot."""
+    async def start(self, webhook_url: Optional[str] = None) -> None:
+        """Initialize and start the bot with webhook (preferred) or polling."""
         self._application = Application.builder().token(self.token).build()
         
         # Register handlers
@@ -312,10 +312,20 @@ class TelegramTradingBot:
             CallbackQueryHandler(self.handle_callback)
         )
         
-        # Start polling
+        # Initialize app
         await self._application.initialize()
-        await self._application.start()
-        await self._application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        
+        # Use webhook if URL provided (better for production)
+        if webhook_url:
+            await self._application.bot.set_webhook(webhook_url, drop_pending_updates=True)
+            logger.info(f"Telegram bot using webhook: {webhook_url}")
+        else:
+            # Use polling with drop_pending to avoid conflicts
+            await self._application.start()
+            await self._application.updater.start_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True  # Avoid conflicts with old messages
+            )
         
         self._connected = True
         logger.info("Telegram bot started successfully")
@@ -327,7 +337,8 @@ class TelegramTradingBot:
         
         if self._application:
             await self._application.stop()
-            await self._application.updater.stop()
+            if self._application.updater.running:
+                await self._application.updater.stop()
         self._connected = False
         logger.info("Telegram bot stopped")
     

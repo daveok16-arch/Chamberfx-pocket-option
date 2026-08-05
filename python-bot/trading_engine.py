@@ -11,6 +11,7 @@ Main orchestrator that integrates:
 
 import asyncio
 import logging
+import os
 from typing import Optional, Dict, List, Callable, Awaitable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -142,9 +143,13 @@ class TradingEngine:
         self.po_client.set_bar_callback(self._on_bar_complete)
         self.po_client.set_tvv_callback(self._on_tvv)
         
-        # Start Telegram bot
+        # Start Telegram bot (use webhook if URL provided via env)
         logger.info("[ENGINE] Starting Telegram bot...")
-        await self.telegram.start()
+        webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL")
+        if webhook_url:
+            await self.telegram.start(webhook_url=webhook_url)
+        else:
+            await self.telegram.start()
         
         logger.info("[ENGINE] All systems online")
     
