@@ -20,7 +20,7 @@ from pocket_option_client import PocketOptionClient, PriceUpdate
 from tick_volume_bars import TickVolumeBar, Tick
 from micro_momentum import TVVReading
 from indicators import TechnicalIndicatorPipeline, IndicatorResult
-from telegram_bot import TelegramTradingBot, ExpirationType
+from telegram_bot import TelegramTradingBot
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -58,6 +58,7 @@ class TradeResult:
 class TradingEngine:
     """
     Main trading engine that coordinates all components.
+    Fully integrated with TelegramTradingBot for live signals.
     """
     
     def __init__(
@@ -83,18 +84,21 @@ class TradingEngine:
         
         self.telegram = TelegramTradingBot(
             token=telegram_token,
-            on_signal_callback=self._on_telegram_signal_request
+            trading_engine=self  # Pass self for direct access
         )
         
         # Indicator pipeline (for tick-volume bars)
         self.indicators = TechnicalIndicatorPipeline(min_bars=50)
         
+        # Per-asset indicator results cache
+        self._indicator_results: Dict[str, Optional[IndicatorResult]] = {}
+        
         # Signal debouncing
         self._signal_cooldown: Dict[str, float] = {}  # asset -> last_signal_time
         self._signal_cooldown_seconds = 60
         
-        # Active analysis sessions (chat_id -> task)
-        self._analysis_tasks: Dict[int, asyncio.Task] = {}
+        # Connection state
+        self._running = False
         
         # Trade tracking
         self._active_trades: Dict[str, TradingSignal] = {}
@@ -102,6 +106,11 @@ class TradingEngine:
         
         # Callbacks
         self._on_signal: Optional[Callable[[TradingSignal], Awaitable None]] = None
+    
+    @property
+    def connected(self) -> bool:
+        """Check if Pocket Option is connected."""
+        return self.po_client and self.po_client.connected
     
     def set_signal_callback(
         self, 
@@ -116,11 +125,12 @@ class TradingEngine:
         logger.info("Starting Trading Engine")
         logger.info("=" * 50)
         
+        self._running = True
+        
         # Connect to Pocket Option
         logger.info("[ENGINE] Connecting to Pocket Option...")
         if not await self.po_client.connect():
             logger.error("[ENGINE] Failed to connect to Pocket Option")
-            return
         
         # Set up callbacks
         self.po_client.set_tick_callback(self._on_tick)
@@ -136,16 +146,64 @@ class TradingEngine:
     async def stop(self) -> None:
         """Stop the trading engine."""
         logger.info("[ENGINE] Shutting down...")
+        self._running = False
         
-        # Cancel analysis tasks
-        for task in self._analysis_tasks.values():
-            task.cancel()
-        
-        # Disconnect
-        await self.po_client.disconnect()
+        # Stop Telegram
         await self.telegram.stop()
         
+        # Disconnect Pocket Option
+        await self.po_client.disconnect()
+        
         logger.info("[ENGINE] Shutdown complete")
+    
+    # ============================================
+    # PUBLIC API FOR TELEGRAM BOT
+    # ============================================
+    
+    def get_all_tvv_readings(self) -> Dict[str, Optional[TVVReading]]:
+        """
+        Get TVV readings for all tracked assets.
+        Called by Telegram bot during analysis.
+        """
+        return {
+            asset_id: self.po_client.get_tvv_reading(asset_id)
+            for asset_id in self.assets
+        }
+    
+    def get_all_indicator_results(self) -> Dict[str, Optional[IndicatorResult]]:
+        """
+        Get indicator results for all assets.
+        Updated when bars complete.
+        """
+        return self._indicator_results.copy()
+    
+    def get_current_price(self, asset_id: str) -> Optional[float]:
+        """Get current price for an asset."""
+        return self.po_client._last_prices.get(asset_id)
+    
+    def get_time_remaining(self) -> int:
+        """Get seconds remaining in current candle."""
+        now = datetime.now().timestamp()
+        candle_period = 60
+        candle_start = int(now / candle_period) * candle_period
+        candle_end = candle_start + candle_period
+        return int(candle_end - now)
+    
+    def is_in_cooldown(self, asset_id: str) -> bool:
+        """Check if asset is in signal cooldown."""
+        if asset_id not in self._signal_cooldown:
+            return False
+        
+        elapsed = datetime.now().timestamp() - self._signal_cooldown[asset_id]
+        return elapsed < self._signal_cooldown_seconds
+    
+    def set_cooldown(self, asset_id: str) -> None:
+        """Set cooldown for an asset after signal."""
+        self._signal_cooldown[asset_id] = datetime.now().timestamp()
+    
+    # ============================================
+    # INTERNAL CALLBACKS
+    # ============================================
     
     def _on_tick(self, update: PriceUpdate) -> None:
         """Handle raw tick update."""
@@ -155,11 +213,23 @@ class TradingEngine:
         )
     
     def _on_bar_complete(self, asset_id: str, bar: TickVolumeBar) -> None:
-        """Handle completed tick-volume bar."""
+        """Handle completed tick-volume bar - calculate indicators."""
         logger.debug(
             f"[BAR] {asset_id}: O={bar.open:.5f} H={bar.high:.5f} "
             f"L={bar.low:.5f} C={bar.close:.5f} ({bar.tick_count} ticks)"
         )
+        
+        # Calculate indicators for this asset
+        bars = self.po_client.get_current_bars(asset_id)
+        if len(bars) >= 50:
+            result = self.indicators.calculate(bars)
+            self._indicator_results[asset_id] = result
+            
+            if result and result.signal != "WAIT":
+                logger.info(
+                    f"[INDICATORS] {asset_id}: {result.signal} "
+                    f"(strength: {result.signal_strength}%)"
+                )
     
     def _on_tvv(self, asset_id: str, tvv: TVVReading) -> None:
         """Handle TVV reading update."""
@@ -168,223 +238,6 @@ class TradingEngine:
                 f"[TVV] {asset_id}: {tvv.signal} "
                 f"(conf={tvv.confidence}%, bias={tvv.tick_direction_bias:.2f})"
             )
-    
-    async def _on_telegram_signal_request(
-        self,
-        chat_id: int,
-        expiration: ExpirationType
-    ) -> None:
-        """
-        Handle signal request from Telegram.
-        Runs analysis for 1-3 seconds then sends signal.
-        """
-        logger.info(f"[ENGINE] Analysis request from {chat_id} for {expiration.label}")
-        
-        # Cancel existing analysis for this chat
-        if chat_id in self._analysis_tasks:
-            self._analysis_tasks[chat_id].cancel()
-        
-        # Run analysis
-        task = asyncio.create_task(
-            self._run_analysis(chat_id, expiration)
-        )
-        self._analysis_tasks[chat_id] = task
-        
-        try:
-            await task
-        except asyncio.CancelledError:
-            logger.info(f"[ENGINE] Analysis cancelled for {chat_id}")
-        except Exception as e:
-            logger.error(f"[ENGINE] Analysis error: {e}")
-            await self.telegram.send_error(chat_id, str(e))
-    
-    async def _run_analysis(
-        self,
-        chat_id: int,
-        expiration: ExpirationType
-    ) -> None:
-        """
-        Run market analysis for specified duration.
-        Returns when conditions match or timeout reached.
-        """
-        # Analysis duration based on expiration
-        if expiration.seconds <= 15:
-            analysis_duration = 1.0  # 1 second for turbo
-        elif expiration.seconds <= 60:
-            analysis_duration = 2.0  # 2 seconds for short
-        else:
-            analysis_duration = 3.0  # 3 seconds for longer
-        
-        start_time = asyncio.get_event_loop().time()
-        deadline = start_time + analysis_duration
-        
-        # Strategy selection
-        if expiration.seconds <= 15:
-            strategy = "MICRO_MOMENTUM"
-        else:
-            strategy = "TICK_VOLUME"
-        
-        logger.info(
-            f"[ANALYSIS] Starting {strategy} analysis for {expiration.label} "
-            f"(duration: {analysis_duration}s)"
-        )
-        
-        while asyncio.get_event_loop().time() < deadline:
-            # Check for trading opportunity
-            signal = await self._check_conditions(expiration, strategy)
-            
-            if signal and signal.direction != "WAIT":
-                logger.info(
-                    f"[ANALYSIS] Signal found: {signal.direction} "
-                    f"{signal.asset_id} (confidence: {signal.confidence}%)"
-                )
-                
-                # Send to Telegram
-                await self.telegram.send_signal(
-                    chat_id=chat_id,
-                    asset_id=signal.asset_id,
-                    direction=signal.direction,
-                    entry_price=signal.entry_price,
-                    confidence=signal.confidence,
-                    time_remaining=signal.time_remaining,
-                    expiration=signal.expiration,
-                    reasons=signal.reasons
-                )
-                
-                # Fire callback
-                if self._on_signal:
-                    await self._on_signal(signal)
-                
-                return  # Analysis complete
-            
-            await asyncio.sleep(0.1)  # Check every 100ms
-        
-        # No signal found within deadline
-        logger.info(f"[ANALYSIS] No signal found within {analysis_duration}s")
-        
-        # Send "no signal" message
-        await self.telegram._application.bot.send_message(
-            chat_id=chat_id,
-            text="⏰ <b>Analysis Complete</b>\n\n"
-                 "No suitable trading opportunity found.\n"
-                 "Try again in a moment.",
-            parse_mode='HTML'
-        )
-    
-    async def _check_conditions(
-        self,
-        expiration: ExpirationType,
-        strategy: str
-    ) -> Optional[TradingSignal]:
-        """
-        Check if trading conditions are met.
-        Returns TradingSignal if conditions match, None otherwise.
-        """
-        time_remaining = self._get_time_remaining()
-        
-        for asset_id in self.assets:
-            # Check cooldown
-            if asset_id in self._signal_cooldown:
-                last_signal = self._signal_cooldown[asset_id]
-                if datetime.now().timestamp() - last_signal < self._signal_cooldown_seconds:
-                    continue
-            
-            if strategy == "MICRO_MOMENTUM":
-                signal = await self._check_micro_momentum(asset_id, expiration, time_remaining)
-            else:
-                signal = await self._check_tick_volume(asset_id, expiration, time_remaining)
-            
-            if signal and signal.direction != "WAIT":
-                self._signal_cooldown[asset_id] = datetime.now().timestamp()
-                return signal
-        
-        return None
-    
-    async def _check_micro_momentum(
-        self,
-        asset_id: str,
-        expiration: ExpirationType,
-        time_remaining: int
-    ) -> Optional[TradingSignal]:
-        """Check trading conditions using micro-momentum (TVV)."""
-        tvv = self.po_client.get_tvv_reading(asset_id)
-        
-        if not tvv or tvv.signal == "WAIT":
-            return None
-        
-        if tvv.confidence < self.min_confidence:
-            return None
-        
-        current_price = self.po_client._last_prices.get(asset_id)
-        if not current_price:
-            return None
-        
-        reasons = [
-            f"TVV momentum score: {tvv.momentum_score}",
-            f"Tick direction bias: {tvv.tick_direction_bias:.2f}",
-            f"Volatility index: {tvv.volatility_index:.2f}",
-        ]
-        
-        if tvv.price_acceleration > 0:
-            reasons.append("Positive price acceleration")
-        else:
-            reasons.append("Negative price acceleration")
-        
-        return TradingSignal(
-            asset_id=asset_id,
-            direction=tvv.signal,
-            entry_price=current_price,
-            confidence=tvv.confidence,
-            time_remaining=time_remaining,
-            expiration=expiration.label,
-            strategy="MICRO_MOMENTUM",
-            reasons=reasons,
-            tvv=tvv
-        )
-    
-    async def _check_tick_volume(
-        self,
-        asset_id: str,
-        expiration: ExpirationType,
-        time_remaining: int
-    ) -> Optional[TradingSignal]:
-        """Check trading conditions using tick-volume bars."""
-        bars = self.po_client.get_current_bars(asset_id)
-        
-        if len(bars) < 50:
-            return None
-        
-        result = self.indicators.calculate(bars)
-        
-        if not result or result.signal == "WAIT":
-            return None
-        
-        if result.signal_strength < self.min_confidence:
-            return None
-        
-        current_price = self.po_client._last_prices.get(asset_id)
-        if not current_price:
-            return None
-        
-        return TradingSignal(
-            asset_id=asset_id,
-            direction=result.signal,
-            entry_price=current_price,
-            confidence=result.signal_strength,
-            time_remaining=time_remaining,
-            expiration=expiration.label,
-            strategy="TICK_VOLUME",
-            reasons=result.reasons,
-            indicators=result
-        )
-    
-    def _get_time_remaining(self) -> int:
-        """Get seconds remaining in current candle."""
-        now = datetime.now().timestamp()
-        candle_period = 60
-        candle_start = int(now / candle_period) * candle_period
-        candle_end = candle_start + candle_period
-        return int(candle_end - now)
 
 
 async def main():
@@ -394,11 +247,7 @@ async def main():
     
     load_dotenv()
     
-    TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-    
-    if not TELEGRAM_TOKEN:
-        logger.error("TELEGRAM_TOKEN not found in environment")
-        return
+    TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8214823027:AAFecgXUdvfnI9uPhvDD7wmE26N9DWZmpzs")
     
     engine = TradingEngine(
         telegram_token=TELEGRAM_TOKEN,
