@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Global reference to trading engine
 _engine = None
+_telegram_app = None
 
 
 async def health_handler(request):
@@ -35,10 +36,25 @@ async def root_handler(request):
     return web.Response(text="CHAMBERFX Trading Bot is running", content_type="text/plain", status=200)
 
 
+async def telegram_webhook_handler(request):
+    """Handle incoming Telegram webhook updates."""
+    global _telegram_app
+    try:
+        data = await request.json()
+        update = web.Application._parse_update(data) if hasattr(web.Application, '_parse_update') else None
+        if _telegram_app:
+            await _telegram_app.update_queue.put(data)
+        return web.Response(text="OK", status=200)
+    except Exception as e:
+        logger.error(f"Telegram webhook error: {e}")
+        return web.Response(text="Error", status=500)
+
+
 async def start_trading_engine(app):
     """Start the trading engine in background."""
-    global _engine
+    global _engine, _telegram_app
     from trading_engine import TradingEngine
+    from telegram_bot import TelegramTradingBot
     
     telegram_token = os.getenv("TELEGRAM_TOKEN")
     if not telegram_token:
@@ -66,6 +82,9 @@ async def start_trading_engine(app):
         min_confidence=min_confidence
     )
     
+    # Store reference to telegram app for webhook
+    _telegram_app = _engine.telegram._application
+    
     # Start the engine
     asyncio.create_task(_engine.start())
     logger.info("Trading engine started in background")
@@ -85,9 +104,10 @@ async def main():
     # Create aiohttp application
     app = web.Application()
     
-    # Add routes - IMPORTANT: /health must be registered
+    # Add routes
     app.router.add_get('/health', health_handler)
     app.router.add_get('/', root_handler)
+    app.router.add_post('/telegram', telegram_webhook_handler)
     
     # Start/stop hooks
     app.on_startup.append(start_trading_engine)
@@ -104,6 +124,7 @@ async def main():
     logger.info(f"=" * 50)
     logger.info(f"CHAMBERFX Bot Server started on port {port}")
     logger.info(f"Health check: http://0.0.0.0:{port}/health")
+    logger.info(f"Telegram webhook: http://0.0.0.0:{port}/telegram")
     logger.info(f"=" * 50)
     
     # Keep running

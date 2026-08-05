@@ -299,7 +299,7 @@ class TelegramTradingBot:
         return self._connected
     
     async def start(self, webhook_url: Optional[str] = None) -> None:
-        """Initialize and start the bot with webhook (preferred) or polling."""
+        """Initialize and start the bot with webhook or polling."""
         self._application = Application.builder().token(self.token).build()
         
         # Register handlers
@@ -315,20 +315,26 @@ class TelegramTradingBot:
         # Initialize app
         await self._application.initialize()
         
-        # Use webhook if URL provided (better for production)
+        # Use webhook if URL provided
         if webhook_url:
-            await self._application.bot.set_webhook(webhook_url, drop_pending_updates=True)
-            logger.info(f"Telegram bot using webhook: {webhook_url}")
+            await self._application.bot.set_webhook(f"{webhook_url}/telegram", drop_pending_updates=True)
+            logger.info(f"Telegram bot using webhook: {webhook_url}/telegram")
         else:
-            # Use polling with drop_pending to avoid conflicts
+            # Use polling - PTB 20.x style
             await self._application.start()
             await self._application.updater.start_polling(
-                allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=True  # Avoid conflicts with old messages
+                drop_pending_updates=True,
+                errors_callback=self._handle_polling_error
             )
         
         self._connected = True
         logger.info("Telegram bot started successfully")
+    
+    def _handle_polling_error(self, error: Exception) -> None:
+        """Handle polling errors gracefully."""
+        logger.warning(f"Polling error: {error}")
+        if "Conflict" in str(error):
+            logger.warning("Telegram conflict detected - another instance may be running")
     
     async def stop(self) -> None:
         """Stop the bot."""
@@ -336,9 +342,11 @@ class TelegramTradingBot:
             task.cancel()
         
         if self._application:
-            await self._application.stop()
-            if self._application.updater.running:
+            try:
                 await self._application.updater.stop()
+            except Exception:
+                pass
+            await self._application.stop()
         self._connected = False
         logger.info("Telegram bot stopped")
     
