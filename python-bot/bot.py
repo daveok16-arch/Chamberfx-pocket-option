@@ -62,11 +62,24 @@ async def start_trading_engine(app):
     min_confidence = int(os.getenv("MIN_CONFIDENCE", "70"))
     tick_threshold = int(os.getenv("TICK_THRESHOLD", "175"))
     
+    # Auto-detect webhook URL from Render's environment
+    webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL")
+    if not webhook_url:
+        # Try to auto-detect from Render environment
+        render_url = os.getenv("RENDER_EXTERNAL_URL")
+        if render_url:
+            webhook_url = render_url
+            logger.info(f"Auto-detected webhook URL: {webhook_url}")
+        else:
+            logger.warning("No TELEGRAM_WEBHOOK_URL set - Telegram will use polling (may conflict)")
+    
     logger.info("=" * 60)
     logger.info("CHAMBERFX Trading Bot - Production Mode")
     logger.info("=" * 60)
     logger.info(f"Min Confidence: {min_confidence}")
     logger.info(f"Tick Threshold: {tick_threshold}")
+    if webhook_url:
+        logger.info(f"Telegram Webhook: {webhook_url}/telegram")
     
     _engine = TradingEngine(
         telegram_token=telegram_token,
@@ -77,7 +90,8 @@ async def start_trading_engine(app):
             'BTCUSD_otc', 'ETHUSD_otc',
         ],
         tick_threshold=tick_threshold,
-        min_confidence=min_confidence
+        min_confidence=min_confidence,
+        webhook_url=webhook_url
     )
     
     # Store reference to telegram bot for webhook

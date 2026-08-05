@@ -67,7 +67,8 @@ class TradingEngine:
         telegram_token: str,
         assets: Optional[List[str]] = None,
         tick_threshold: int = 175,
-        min_confidence: int = 65
+        min_confidence: int = 65,
+        webhook_url: Optional[str] = None
     ):
         # Configuration
         self.assets = assets or [
@@ -81,6 +82,7 @@ class TradingEngine:
         ]
         self.tick_threshold = tick_threshold
         self.min_confidence = min_confidence
+        self.webhook_url = webhook_url
         
         # Components
         self.po_client = PocketOptionClient(
@@ -143,11 +145,10 @@ class TradingEngine:
         self.po_client.set_bar_callback(self._on_bar_complete)
         self.po_client.set_tvv_callback(self._on_tvv)
         
-        # Start Telegram bot (use webhook if URL provided via env)
+        # Start Telegram bot (use webhook if URL provided)
         logger.info("[ENGINE] Starting Telegram bot...")
-        webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL")
-        if webhook_url:
-            await self.telegram.start(webhook_url=webhook_url)
+        if self.webhook_url:
+            await self.telegram.start(webhook_url=self.webhook_url)
         else:
             await self.telegram.start()
         
