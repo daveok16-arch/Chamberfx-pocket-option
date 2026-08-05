@@ -317,12 +317,14 @@ class TelegramTradingBot:
         await self._application.initialize()
         
         if webhook_url:
-            # Use webhook mode - set webhook first, then start
+            # Use webhook mode - set webhook and start processing
             webhook_path = f"{webhook_url}/telegram"
             await self._application.bot.set_webhook(
                 webhook_path,
                 drop_pending_updates=True
             )
+            # Start the application to process incoming updates from queue
+            await self._application.start()
             logger.info(f"Telegram bot using webhook: {webhook_path}")
         else:
             # Use polling mode
