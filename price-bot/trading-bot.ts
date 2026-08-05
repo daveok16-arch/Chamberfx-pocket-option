@@ -11,6 +11,7 @@
 
 import { WebSocket } from "ws";
 import { chromium } from "playwright";
+import { telegram } from "./telegram.js";
 import * as fs from "fs";
 
 // ============================================
@@ -720,6 +721,14 @@ export class PocketOptionTradingBot {
     }
   }
 
+  private getTimeRemaining(): number {
+    const now = Math.floor(Date.now() / 1000);
+    const candlePeriod = 60; // 1 minute candles
+    const candleStart = Math.floor(now / candlePeriod) * candlePeriod;
+    const candleEnd = candleStart + candlePeriod;
+    return candleEnd - now;
+  }
+  
   private normalizeAssetId(rawId: string): string | null {
     const normalized = rawId.replace(/^#/, '').toUpperCase();
     for (const assetId of this.assets.keys()) {
@@ -785,11 +794,33 @@ export class PocketOptionTradingBot {
     const lastSignal = this.signals.get(asset.id);
     if (!lastSignal || lastSignal.direction !== signal.direction || signal.direction !== 'WAIT') {
       if (signal.direction !== 'WAIT') {
+        // Only send if different direction or after 60 seconds cooldown
+        const lastSignal = this.signals.get(asset.id);
+        if (lastSignal && lastSignal.direction === signal.direction && 
+            Date.now() - signal.timestamp < 60000) {
+          return; // Skip duplicate signal within 60 seconds
+        }
+        
         this.signals.set(asset.id, signal);
         asset.lastSignal = signal;
         
+        const timeRemaining = this.getTimeRemaining();
+        
         this.log(`[SIGNAL] ${asset.id}: ${signal.direction} (${signal.strength}%) @ ${price.toFixed(5)}`);
         this.log(`[SIGNAL] Reasons: ${signal.reasons.join(', ')}`);
+        
+        // Send to Telegram
+        telegram.sendSignal({
+          assetId: asset.id,
+          direction: signal.direction,
+          entryPrice: price,
+          confidence: signal.strength,
+          timeRemaining,
+          entryQuality: timeRemaining >= 50 ? 'EXCELLENT' : timeRemaining >= 40 ? 'GOOD' : 'FAIR',
+          reasons: signal.reasons,
+          timestamp: Date.now()
+        }).then(() => this.log(`[TELEGRAM] Signal sent ✓`))
+          .catch(e => this.log(`[TELEGRAM] Error: ${e.message}`));
         
         this.onSignalCallback?.(signal);
       }
@@ -1027,7 +1058,17 @@ async function main() {
   console.log('\n===========================================');
   console.log('  Pocket Option Trading Bot v1.0');
   console.log('  Live Price • Technical Analysis • Signals');
+  console.log('  → Telegram Notifications Enabled');
   console.log('===========================================\n');
+
+  // Test Telegram connection
+  console.log('[TELEGRAM] Testing connection...');
+  const tgConnected = await telegram.test();
+  if (tgConnected) {
+    console.log('[TELEGRAM] ✅ Connected! Signals will be sent to Telegram.\n');
+  } else {
+    console.log('[TELEGRAM] ⚠️ Connection failed. Continuing without Telegram.\n');
+  }
 
   const bot = new PocketOptionTradingBot({
     assets: ['EURUSD_otc', 'GBPUSD_otc', 'USDJPY_otc', 'XAUUSD_otc', 'AUDUSD_otc', 'USDCAD_otc'],
