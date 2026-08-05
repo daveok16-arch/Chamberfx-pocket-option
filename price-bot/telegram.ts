@@ -3,9 +3,13 @@
  * Sends trading signals and alerts to Telegram
  */
 
-const BOT_TOKEN = '8214823027:AAFecgXUdvfnI9uPhvDD7wmE26N9DWZmpzs';
-const CHAT_ID = '7779937295';
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
 const API_URL = `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+if (!BOT_TOKEN) {
+  throw new Error('TELEGRAM_BOT_TOKEN environment variable is required');
+}
 
 export interface SignalMessage {
   assetId: string;

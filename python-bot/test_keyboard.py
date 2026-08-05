@@ -6,8 +6,17 @@ import os
 import asyncio
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application
+from dotenv import load_dotenv
 
-TELEGRAM_TOKEN = "8214823027:AAFecgXUdvfnI9uPhvDD7wmE26N9DWZmpzs"
+load_dotenv()
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN environment variable is required")
+
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+if not TELEGRAM_CHAT_ID:
+    raise ValueError("TELEGRAM_CHAT_ID environment variable is required")
 
 
 def build_keyboard():
@@ -44,7 +53,7 @@ async def main():
     
     # Send test message with keyboard
     message = await app.bot.send_message(
-        chat_id=7779937295,
+        chat_id=int(TELEGRAM_CHAT_ID),
         text="🎯 <b>Test Inline Keyboard</b>\n\nSelect your trade expiration time:",
         reply_markup=build_keyboard(),
         parse_mode='HTML'
