@@ -1,0 +1,6 @@
+{
+  "name": "ChamberFX Signal Terminal",
+  "description": "Chamber FX Quantitative Signal Terminal v4.3.0 featuring multi-pair scans, 18-second candle entry window enforcement, 82% conviction floors, execution-lag simulated paper trading, and trade history exports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

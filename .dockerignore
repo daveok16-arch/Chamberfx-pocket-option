@@ -1,0 +1,11 @@
+node_modules
+dist
+.env
+.git
+.github
+*.log
+websocket_audit_log.json
+test-discover.ts
+test-sockets.ts
+test-captured-ws.ts
+tmp
