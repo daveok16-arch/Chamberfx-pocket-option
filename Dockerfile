@@ -25,5 +25,8 @@ WORKDIR /app/python-bot
 RUN useradd -m botuser && chown -R botuser:botuser /app/python-bot
 USER botuser
 
-# Run the bot (background worker)
+# Expose port
+EXPOSE 10000
+
+# Run the bot with web health server
 CMD ["python", "bot.py"]

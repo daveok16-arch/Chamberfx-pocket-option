@@ -1,9 +1,9 @@
 # Render.com Blueprint
-# Deploys the CHAMBERFX Trading Bot as a Background Worker
+# Deploys the CHAMBERFX Trading Bot as a Web Service
 # Root directory: python-bot
 
 services:
-  - type: worker
+  - type: web
     name: chamberfx-trading-bot
     env: python
     region: oregon
@@ -11,6 +11,7 @@ services:
     rootDirectory: python-bot
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
+    healthCheckPath: /health
     envVars:
       - key: TELEGRAM_TOKEN
         sync: false
@@ -22,3 +23,5 @@ services:
         value: "70"
       - key: TICK_THRESHOLD
         value: "175"
+      - key: PORT
+        value: "10000"
