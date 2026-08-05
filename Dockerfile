@@ -25,9 +25,5 @@ WORKDIR /app/python-bot
 RUN useradd -m botuser && chown -R botuser:botuser /app/python-bot
 USER botuser
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
-    CMD python -c "import sys; sys.exit(0)"
-
-# Run the bot
+# Run the bot (background worker)
 CMD ["python", "bot.py"]
