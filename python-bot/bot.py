@@ -43,7 +43,10 @@ async def telegram_webhook_handler(request):
         data = await request.json()
         if _telegram_bot and _telegram_bot._application:
             await _telegram_bot._application.update_queue.put(data)
-        return web.Response(text="OK", status=200)
+            return web.Response(text="OK", status=200)
+        else:
+            logger.warning("Telegram bot not ready yet")
+            return web.Response(text="Bot not ready", status=503)
     except Exception as e:
         logger.error(f"Telegram webhook error: {e}")
         return web.Response(text="Error", status=500)
@@ -94,12 +97,12 @@ async def start_trading_engine(app):
         webhook_url=webhook_url
     )
     
-    # Store reference to telegram bot for webhook
+    # Store telegram bot reference BEFORE starting (for webhook handling)
     _telegram_bot = _engine.telegram
     
-    # Start the engine
+    # Start the engine in background
     asyncio.create_task(_engine.start())
-    logger.info("Trading engine started in background")
+    logger.info("Trading engine starting in background...")
 
 
 async def stop_trading_engine(app):
