@@ -1,11 +1,12 @@
 {
   "name": "pocket-option-price-bot",
   "version": "1.0.0",
-  "description": "Live price capture bot for Pocket Option OTC pairs via WebSocket",
+  "description": "Trading bot for Pocket Option OTC pairs - Live prices, technical analysis, signals",
   "type": "module",
   "main": "server.js",
   "scripts": {
     "dev": "tsx server.ts",
+    "trading": "tsx trading-bot.ts",
     "build": "tsc",
     "start": "node server.js"
   },
