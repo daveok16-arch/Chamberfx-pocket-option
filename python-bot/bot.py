@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Global reference to trading engine
 _engine = None
-_telegram_app = None
+_telegram_bot = None
 
 
 async def health_handler(request):
@@ -38,12 +38,11 @@ async def root_handler(request):
 
 async def telegram_webhook_handler(request):
     """Handle incoming Telegram webhook updates."""
-    global _telegram_app
+    global _telegram_bot
     try:
         data = await request.json()
-        update = web.Application._parse_update(data) if hasattr(web.Application, '_parse_update') else None
-        if _telegram_app:
-            await _telegram_app.update_queue.put(data)
+        if _telegram_bot and _telegram_bot._application:
+            await _telegram_bot._application.update_queue.put(data)
         return web.Response(text="OK", status=200)
     except Exception as e:
         logger.error(f"Telegram webhook error: {e}")
@@ -52,9 +51,8 @@ async def telegram_webhook_handler(request):
 
 async def start_trading_engine(app):
     """Start the trading engine in background."""
-    global _engine, _telegram_app
+    global _engine, _telegram_bot
     from trading_engine import TradingEngine
-    from telegram_bot import TelegramTradingBot
     
     telegram_token = os.getenv("TELEGRAM_TOKEN")
     if not telegram_token:
@@ -82,8 +80,8 @@ async def start_trading_engine(app):
         min_confidence=min_confidence
     )
     
-    # Store reference to telegram app for webhook
-    _telegram_app = _engine.telegram._application
+    # Store reference to telegram bot for webhook
+    _telegram_bot = _engine.telegram
     
     # Start the engine
     asyncio.create_task(_engine.start())

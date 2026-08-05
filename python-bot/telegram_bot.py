@@ -299,7 +299,8 @@ class TelegramTradingBot:
         return self._connected
     
     async def start(self, webhook_url: Optional[str] = None) -> None:
-        """Initialize and start the bot with webhook or polling."""
+        """Initialize and start the bot with webhook (recommended for production)."""
+        # Build application
         self._application = Application.builder().token(self.token).build()
         
         # Register handlers
@@ -315,26 +316,33 @@ class TelegramTradingBot:
         # Initialize app
         await self._application.initialize()
         
-        # Use webhook if URL provided
         if webhook_url:
-            await self._application.bot.set_webhook(f"{webhook_url}/telegram", drop_pending_updates=True)
-            logger.info(f"Telegram bot using webhook: {webhook_url}/telegram")
-        else:
-            # Use polling - PTB 20.x style
-            await self._application.start()
-            await self._application.updater.start_polling(
-                drop_pending_updates=True,
-                errors_callback=self._handle_polling_error
+            # Use webhook mode - set webhook first, then start
+            webhook_path = f"{webhook_url}/telegram"
+            await self._application.bot.set_webhook(
+                webhook_path,
+                drop_pending_updates=True
             )
+            logger.info(f"Telegram bot using webhook: {webhook_path}")
+        else:
+            # Use polling mode
+            try:
+                await self._application.start()
+                await self._application.updater.start_polling(
+                    drop_pending_updates=True
+                )
+                logger.info("Telegram bot using polling mode")
+            except Exception as e:
+                logger.warning(f"Polling error: {e}")
+                logger.info("Falling back to no polling - use webhook mode for production")
         
         self._connected = True
         logger.info("Telegram bot started successfully")
     
-    def _handle_polling_error(self, error: Exception) -> None:
-        """Handle polling errors gracefully."""
-        logger.warning(f"Polling error: {error}")
-        if "Conflict" in str(error):
-            logger.warning("Telegram conflict detected - another instance may be running")
+    async def process_webhook_update(self, data: dict) -> None:
+        """Process an update received via webhook."""
+        if self._application:
+            await self._application.update_queue.put(data)
     
     async def stop(self) -> None:
         """Stop the bot."""
