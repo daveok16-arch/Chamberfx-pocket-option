@@ -41,13 +41,37 @@ logger = logging.getLogger(__name__)
 # CONSTANTS
 # ============================================
 
-# Available OTC pairs for selection
+# Available OTC pairs with display name and typical payout
+# Format: (asset_id, display_name, emoji)
 OTC_PAIRS = [
-    ("EURUSD_otc", "EURUSD/OTC"),
-    ("AUDUSD_otc", "AUDUSD/OTC"),
-    ("GBPUSD_otc", "GBPUSD/OTC"),
-    ("USDJPY_otc", "USDJPY/OTC"),
+    # Major Pairs (highest payout ~80-90%)
+    ("EURUSD_otc", "EURUSD/OTC", "💰"),
+    ("GBPUSD_otc", "GBPUSD/OTC", "💰"),
+    ("USDJPY_otc", "USDJPY/OTC", "💰"),
+    # Commodity & Minor (75-85%)
+    ("XAUUSD_otc", "XAUUSD/OTC", "🥇"),  # Gold
+    ("AUDUSD_otc", "AUDUSD/OTC", "🦘"),
+    ("USDCAD_otc", "USDCAD/OTC", "🍁"),
+    ("NZDUSD_otc", "NZDUSD/OTC", "🇳🇿"),
+    ("EURGBP_otc", "EURGBP/OTC", "🇪🇺🇬🇧"),
+    # Crypto (70-80%)
+    ("BTCUSD_otc", "BTCUSD/OTC", "₿"),
+    ("ETHUSD_otc", "ETHUSD/OTC", "Ξ"),
 ]
+
+# Payout info for each pair (approximate OTC payouts)
+OTC_PAYOUTS = {
+    "EURUSD_otc": 88,
+    "GBPUSD_otc": 85,
+    "USDJPY_otc": 85,
+    "XAUUSD_otc": 80,
+    "AUDUSD_otc": 82,
+    "USDCAD_otc": 80,
+    "NZDUSD_otc": 78,
+    "EURGBP_otc": 78,
+    "BTCUSD_otc": 75,
+    "ETHUSD_otc": 75,
+}
 
 # Expiration mapping: callback_data -> (label, seconds)
 EXPIRATION_MAP = {
@@ -100,21 +124,45 @@ class SignalFormatter:
     
     @staticmethod
     def format_otc_menu() -> tuple[str, InlineKeyboardMarkup]:
-        """Format the OTC Asset Selection Hub menu."""
-        text = "📱 <b>CHAMBERFX OTC STREAM ROUTER</b>\n\nSelect an active OTC currency pair to target and shift the broker connection feed:"
+        """Format the OTC Asset Selection Hub menu with 10 pairs."""
+        text = """📱 <b>CHAMBERFX OTC STREAM ROUTER</b>
+
+Select an active OTC currency pair:
+💰 Major Pairs (88-85% Payout)"""
         
-        keyboard = [
-            # Row 1: EURUSD and AUDUSD
-            [
-                InlineKeyboardButton("📊 EURUSD/OTC", callback_data="setpair_EURUSD_otc"),
-                InlineKeyboardButton("📊 AUDUSD/OTC", callback_data="setpair_AUDUSD_otc"),
-            ],
-            # Row 2: GBPUSD and USDJPY
-            [
-                InlineKeyboardButton("📊 GBPUSD/OTC", callback_data="setpair_GBPUSD_otc"),
-                InlineKeyboardButton("📊 USDJPY/OTC", callback_data="setpair_USDJPY_otc"),
-            ],
-        ]
+        keyboard = []
+        
+        # Row 1: Major Pairs (top payout)
+        keyboard.append([
+            InlineKeyboardButton("💰 EURUSD (88%)", callback_data="setpair_EURUSD_otc"),
+            InlineKeyboardButton("💰 GBPUSD (85%)", callback_data="setpair_GBPUSD_otc"),
+        ])
+        
+        keyboard.append([
+            InlineKeyboardButton("💰 USDJPY (85%)", callback_data="setpair_USDJPY_otc"),
+            InlineKeyboardButton("🥇 XAUUSD (80%)", callback_data="setpair_XAUUSD_otc"),
+        ])
+        
+        # Section 2: Minor Pairs
+        text += "\n🦘 Minor Pairs (82-78% Payout)"
+        
+        keyboard.append([
+            InlineKeyboardButton("🦘 AUDUSD (82%)", callback_data="setpair_AUDUSD_otc"),
+            InlineKeyboardButton("🍁 USDCAD (80%)", callback_data="setpair_USDCAD_otc"),
+        ])
+        
+        keyboard.append([
+            InlineKeyboardButton("🇳🇿 NZDUSD (78%)", callback_data="setpair_NZDUSD_otc"),
+            InlineKeyboardButton("🇪🇺🇬🇧 EURGBP (78%)", callback_data="setpair_EURGBP_otc"),
+        ])
+        
+        # Section 3: Crypto
+        text += "\n₿ Crypto Pairs (75% Payout)"
+        
+        keyboard.append([
+            InlineKeyboardButton("₿ BTCUSD (75%)", callback_data="setpair_BTCUSD_otc"),
+            InlineKeyboardButton("Ξ ETHUSD (75%)", callback_data="setpair_ETHUSD_otc"),
+        ])
         
         return text, InlineKeyboardMarkup(keyboard)
     
@@ -171,12 +219,16 @@ class SignalFormatter:
         time_remaining: int,
         expiration: str,
         reasons: list[str],
-        strategy: str = "TICK_VOLUME"
+        strategy: str = "TICK_VOLUME",
+        payout: int = 85
     ) -> str:
-        """Format a new trading signal."""
+        """Format a new trading signal with payout info."""
         emoji = "📈" if direction == "CALL" else "📉"
         reasons_text = "\n".join([f"   • {r}" for r in reasons])
         quality = "EXCELLENT" if time_remaining >= 50 else "GOOD" if time_remaining >= 40 else "FAIR"
+        
+        # Calculate potential profit ($10 stake)
+        profit = round(10 * payout / 100, 2)
         
         return f"""
 {emoji} <b>NEW SIGNAL</b> {emoji}
@@ -184,6 +236,7 @@ class SignalFormatter:
 🏷️ <b>Asset:</b> {asset_id.replace('_otc', '/OTC')}
 📊 <b>Direction:</b> <code>{direction}</code>
 💰 <b>Entry:</b> {entry_price:.5f}
+💵 <b>Payout:</b> {payout}%
 
 ⏱️ <b>Expiration:</b> {expiration}
 ⏰ <b>Time Left:</b> {time_remaining}s
@@ -193,6 +246,8 @@ class SignalFormatter:
 
 📝 <b>Analysis:</b>
 {reasons_text}
+
+💎 <b>Potential Profit:</b> ${profit} (on $10 stake)
 
 ⏰ <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}
 """
@@ -281,6 +336,14 @@ class TelegramTradingBot:
         if user_id not in self._contexts:
             self._contexts[user_id] = UserContext(user_id=user_id, chat_id=0)
         return self._contexts[user_id]
+    
+    def _get_asset_display(self, asset_id: str) -> str:
+        """Get display name with payout for an asset."""
+        payout = OTC_PAYOUTS.get(asset_id, 85)
+        for aid, display, emoji in OTC_PAIRS:
+            if aid == asset_id:
+                return f"{display} ({payout}%)"
+        return f"{asset_id.replace('_otc', '/OTC')} ({payout}%)"
     
     # ============================================
     # COMMAND HANDLERS
@@ -426,11 +489,8 @@ class TelegramTradingBot:
         ctx.active_asset = asset_id
         ctx.state = MenuState.EXPIRATION_SELECTION
         
-        # Get display name
-        asset_display = next(
-            (display for aid, display in OTC_PAIRS if aid == asset_id),
-            asset_id.replace('_otc', '/OTC')
-        )
+        # Get display name with payout
+        asset_display = self._get_asset_display(asset_id)
         
         # Step 4: Auto-advance to expiration menu
         text, keyboard = self.formatter.format_expiration_menu(asset_display)
@@ -524,12 +584,8 @@ class TelegramTradingBot:
     async def _handle_refresh(self, query: 'CallbackQuery', ctx: UserContext):
         """Handle refresh - restart with same settings."""
         if ctx.active_asset:
-            # Go back to expiration menu
             ctx.state = MenuState.EXPIRATION_SELECTION
-            asset_display = next(
-                (display for aid, display in OTC_PAIRS if aid == ctx.active_asset),
-                ctx.active_asset.replace('_otc', '/OTC')
-            )
+            asset_display = self._get_asset_display(ctx.active_asset)
             text, keyboard = self.formatter.format_expiration_menu(asset_display)
             await query.message.edit_message_text(
                 text=text,
@@ -537,22 +593,17 @@ class TelegramTradingBot:
                 parse_mode='HTML'
             )
         else:
-            # No asset selected, go to asset menu
             await self._handle_nav_asset(query, ctx)
     
     async def _handle_back(self, query: 'CallbackQuery', ctx: UserContext):
         """Handle back button - return to expiration or asset menu."""
         if ctx.active_asset and ctx.state == MenuState.ANALYZING:
-            # Cancel analysis and go to expiration menu
             if ctx.user_id in self._analysis_tasks:
                 self._analysis_tasks[ctx.user_id].cancel()
                 del self._analysis_tasks[ctx.user_id]
             
             ctx.state = MenuState.EXPIRATION_SELECTION
-            asset_display = next(
-                (display for aid, display in OTC_PAIRS if aid == ctx.active_asset),
-                ctx.active_asset.replace('_otc', '/OTC')
-            )
+            asset_display = self._get_asset_display(ctx.active_asset)
             text, keyboard = self.formatter.format_expiration_menu(asset_display)
             await query.message.edit_message_text(
                 text=text,
@@ -560,7 +611,6 @@ class TelegramTradingBot:
                 parse_mode='HTML'
             )
         else:
-            # Go to asset selection
             await self._handle_nav_asset(query, ctx)
     
     # ============================================
@@ -674,6 +724,9 @@ class TelegramTradingBot:
         if not self._application:
             return
         
+        # Get payout for this asset
+        payout = OTC_PAYOUTS.get(signal['asset_id'], 85)
+        
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔄 New Signal", callback_data="refresh")],
             [InlineKeyboardButton("⬅️ Back to Pairs", callback_data="nav_asset")],
@@ -689,7 +742,8 @@ class TelegramTradingBot:
                 time_remaining=signal['time_remaining'],
                 expiration=expiration,
                 reasons=signal['reasons'],
-                strategy=signal.get('strategy', strategy)
+                strategy=signal.get('strategy', strategy),
+                payout=payout
             ),
             reply_markup=keyboard,
             parse_mode='HTML'

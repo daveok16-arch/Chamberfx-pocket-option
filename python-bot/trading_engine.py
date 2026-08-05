@@ -70,8 +70,13 @@ class TradingEngine:
     ):
         # Configuration
         self.assets = assets or [
+            # Major Pairs (highest payout)
             'EURUSD_otc', 'GBPUSD_otc', 'USDJPY_otc',
-            'XAUUSD_otc', 'AUDUSD_otc', 'USDCAD_otc'
+            # Commodity & Minor
+            'XAUUSD_otc', 'AUDUSD_otc', 'USDCAD_otc',
+            'NZDUSD_otc', 'EURGBP_otc',
+            # Crypto
+            'BTCUSD_otc', 'ETHUSD_otc',
         ]
         self.tick_threshold = tick_threshold
         self.min_confidence = min_confidence

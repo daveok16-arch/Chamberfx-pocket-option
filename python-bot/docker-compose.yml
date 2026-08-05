@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  trading-bot:
+    build: .
+    container_name: chamberfx-trading-bot
+    environment:
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - MIN_CONFIDENCE=70
+      - TICK_THRESHOLD=175
+      - LOG_LEVEL=INFO
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
