@@ -8,6 +8,7 @@
     "dev": "tsx server.ts",
     "trading": "tsx trading-bot.ts",
     "signal": "tsx signal-bot.ts",
+    "telegram": "tsx telegram-bot.ts",
     "build": "tsc",
     "start": "node server.js"
   },
