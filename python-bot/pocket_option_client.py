@@ -3,6 +3,7 @@ Pocket Option WebSocket Client
 ==============================
 Async WebSocket client for capturing live OTC prices.
 Uses Engine.IO/Socket.IO protocol with binary data handling.
+No external browser automation required.
 """
 
 import asyncio
@@ -11,7 +12,6 @@ import logging
 from typing import Optional, Callable, Dict, List
 from dataclasses import dataclass
 from datetime import datetime
-from playwright.async_api import async_playwright, Browser, Page
 import websockets
 from websockets.client import WebSocketClientProtocol
 
@@ -39,7 +39,12 @@ class PocketOptionClient:
     """
     Async client for Pocket Option WebSocket API.
     Captures live OTC prices and manages tick data.
+    No Playwright/browser automation required.
     """
+    
+    # Demo server WebSocket URL
+    DEMO_WS_URL = "wss://try-demo-eu.po.market/socket.io/?EIO=4&transport=websocket"
+    DEMO_AUTH = '40["auth",["demo","","web","en"]]'
     
     def __init__(
         self,
@@ -54,8 +59,6 @@ class PocketOptionClient:
         
         # WebSocket state
         self._ws: Optional[WebSocketClientProtocol] = None
-        self._browser: Optional[Browser] = None
-        self._page: Optional[Page] = None
         
         # Session data
         self._ws_url: str = ""
@@ -114,77 +117,17 @@ class PocketOptionClient:
     
     async def discover_session(self) -> bool:
         """
-        Discover WebSocket session using Playwright or use known demo URL.
+        Discover WebSocket session using default demo credentials.
+        No browser automation required - uses known demo server.
         """
-        logger.info("[DISCOVERY] Attempting to discover session...")
+        logger.info("[DISCOVERY] Using default demo session...")
         
-        # Use the known demo server URL
-        self._ws_url = "wss://try-demo-eu.po.market/socket.io/?EIO=4&transport=websocket"
+        self._ws_url = self.DEMO_WS_URL
+        self._auth_packet = self.DEMO_AUTH
         
-        try:
-            # Try to get auth token via Playwright
-            async with async_playwright() as p:
-                self._browser = await p.chromium.launch(
-                    headless=True,
-                    args=['--no-sandbox', '--disable-setuid-sandbox']
-                )
-                
-                context = await self._browser.new_context()
-                self._page = await context.new_page()
-                
-                try:
-                    await self._page.goto(
-                        'https://po.trade/en/cabinet/try-demo/',
-                        wait_until='networkidle',
-                        timeout=15000
-                    )
-                    await asyncio.sleep(3)
-                    
-                    # Extract token from page
-                    try:
-                        token = await self._page.evaluate('''() => {
-                            for (let key in localStorage) {
-                                if (key.includes('token') || key.includes('auth')) {
-                                    return localStorage.getItem(key);
-                                }
-                            }
-                            for (let key in sessionStorage) {
-                                if (key.includes('token') || key.includes('auth')) {
-                                    return sessionStorage.getItem(key);
-                                }
-                            }
-                            return null;
-                        }''')
-                        
-                        if token:
-                            logger.info("[DISCOVERY] Found auth token in storage")
-                            # Auth packet format from successful TypeScript capture
-                            self._auth_packet = f'40["auth",["demo","{token}","web","en"]]'
-                        else:
-                            logger.info("[DISCOVERY] Using default demo auth")
-                            self._auth_packet = '40["auth",["demo","","web","en"]]'
-                            
-                    except Exception as e:
-                        logger.warning(f"[DISCOVERY] Could not extract token: {e}")
-                        self._auth_packet = '40["auth",["demo","","web","en"]]'
-                    
-                except Exception as e:
-                    logger.warning(f"[DISCOVERY] Page navigation warning: {e}")
-                    self._auth_packet = '40["auth",["demo","","web","en"]]'
-                
-                logger.info(f"[DISCOVERY] Using WebSocket URL: {self._ws_url[:50]}...")
-                logger.info("[DISCOVERY] Session discovery complete")
-                return True
-                    
-        except Exception as e:
-            logger.error(f"[DISCOVERY] Error: {e}")
-            # Fallback to known demo URL
-            self._ws_url = "wss://try-demo-eu.po.market/socket.io/?EIO=4&transport=websocket"
-            self._auth_packet = '40["auth",["demo","","web","en"]]'
-            return True
-        finally:
-            if self._browser:
-                await self._browser.close()
+        logger.info(f"[DISCOVERY] WebSocket URL: {self._ws_url[:50]}...")
+        logger.info("[DISCOVERY] Session discovery complete (demo mode)")
+        return True
     
     async def connect(self) -> bool:
         """
