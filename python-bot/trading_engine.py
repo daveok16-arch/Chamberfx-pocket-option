@@ -161,21 +161,23 @@ class TradingEngine:
     # ============================================
     
     def get_all_tvv_readings(self) -> Dict[str, Optional[TVVReading]]:
-        """
-        Get TVV readings for all tracked assets.
-        Called by Telegram bot during analysis.
-        """
+        """Get TVV readings for all tracked assets."""
         return {
             asset_id: self.po_client.get_tvv_reading(asset_id)
             for asset_id in self.assets
         }
     
+    def get_single_tvv_reading(self, asset_id: str) -> Optional[TVVReading]:
+        """Get TVV reading for a specific asset."""
+        return self.po_client.get_tvv_reading(asset_id)
+    
     def get_all_indicator_results(self) -> Dict[str, Optional[IndicatorResult]]:
-        """
-        Get indicator results for all assets.
-        Updated when bars complete.
-        """
+        """Get indicator results for all assets."""
         return self._indicator_results.copy()
+    
+    def get_single_indicator_result(self, asset_id: str) -> Optional[IndicatorResult]:
+        """Get indicator result for a specific asset."""
+        return self._indicator_results.get(asset_id)
     
     def get_current_price(self, asset_id: str) -> Optional[float]:
         """Get current price for an asset."""
@@ -200,6 +202,11 @@ class TradingEngine:
     def set_cooldown(self, asset_id: str) -> None:
         """Set cooldown for an asset after signal."""
         self._signal_cooldown[asset_id] = datetime.now().timestamp()
+    
+    def change_symbol(self, asset_id: str) -> None:
+        """Change the active symbol being streamed."""
+        if self.po_client:
+            self.po_client.set_active_symbol(asset_id)
     
     # ============================================
     # INTERNAL CALLBACKS

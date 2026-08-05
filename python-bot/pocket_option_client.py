@@ -244,6 +244,28 @@ class PocketOptionClient:
             
             logger.info(f"[WS] Subscribed to {asset}")
     
+    async def set_active_symbol(self, asset_id: str) -> None:
+        """
+        Change the active symbol being streamed.
+        Called when user selects a different OTC pair.
+        """
+        if not self._ws or not self._connected:
+            logger.warning("[WS] Cannot change symbol - not connected")
+            return
+        
+        try:
+            msg = json.dumps([
+                "changeSymbol",
+                {"asset": asset_id, "period": 60}
+            ])
+            packet = f"42{msg}"
+            
+            await self._ws.send(packet)
+            logger.info(f"[WS] Symbol changed to: {asset_id}")
+            
+        except Exception as e:
+            logger.error(f"[WS] Failed to change symbol: {e}")
+    
     async def _message_handler(self) -> None:
         """Handle incoming WebSocket messages."""
         pending_binary_event = None
