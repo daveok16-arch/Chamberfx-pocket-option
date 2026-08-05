@@ -1,0 +1,22 @@
+{
+  "name": "pocket-option-price-bot",
+  "version": "1.0.0",
+  "description": "Live price capture bot for Pocket Option OTC pairs via WebSocket",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "build": "tsc",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.21.0",
+    "playwright": "^1.61.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2"
+  }
+}
