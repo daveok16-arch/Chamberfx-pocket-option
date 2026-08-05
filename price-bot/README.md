@@ -1,6 +1,31 @@
-# Pocket Option Live Price Capture Bot
+# Pocket Option Trading Bot v1.0
 
-A lightweight Node.js bot that captures real-time price data from Pocket Option OTC (Over-The-Counter) currency pairs via WebSocket connection.
+A comprehensive trading bot that captures real-time price data from Pocket Option OTC (Over-The-Counter) currency pairs and generates trading signals based on technical analysis.
+
+## Features
+
+- **Real-time Price Capture**: Live tick data via WebSocket (Socket.IO protocol)
+- **Technical Analysis**: EMA, RSI, MACD, Bollinger Bands, ADX, ATR
+- **Signal Generation**: CALL/PUT/WAIT signals based on indicator confluence
+- **Trade Tracking**: Record trades, wins, losses, and performance
+- **Auto-Discovery**: Playwright automatically discovers WebSocket session
+- **Multi-Asset**: Monitor up to 6 OTC pairs simultaneously
+
+## Quick Start
+
+```bash
+npm install
+npm run trading
+```
+
+## Trading Bot (`trading-bot.ts`)
+
+The trading bot provides:
+- Live price monitoring
+- Technical indicator calculation
+- Automatic signal generation
+- Trade tracking and performance metrics
+- Colorful CLI dashboard
 
 ## Features
 
