@@ -123,6 +123,7 @@ async def main():
     app.router.add_get('/health', health_handler)
     app.router.add_get('/', root_handler)
     app.router.add_post('/telegram', telegram_webhook_handler)
+    app.router.add_get('/telegram', lambda r: web.Response(text="Bot webhooks are live!", status=200))
     
     # Start/stop hooks
     app.on_startup.append(start_trading_engine)
