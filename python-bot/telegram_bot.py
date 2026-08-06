@@ -103,7 +103,7 @@ ASSET_ID_PATTERN = re.compile(r'^[A-Z]{3,7}_?otc$', re.IGNORECASE)
 
 
 # ============================================
-# MENU STATES
+# ENUMS AND TYPE DEFINITIONS
 # ============================================
 
 class MenuState(Enum):
@@ -111,6 +111,70 @@ class MenuState(Enum):
     ASSET_SELECTION = "asset_selection"
     EXPIRATION_SELECTION = "expiration_selection"
     ANALYZING = "analyzing"
+
+
+class BotState(Enum):
+    """Bot operational states."""
+    IDLE = "idle"
+    RUNNING = "running"
+    ANALYZING = "analyzing"
+    STOPPING = "stopping"
+
+
+class ExpirationType:
+    """Expiration type definition for telegram callbacks."""
+    def __init__(self, label: str, seconds: int, callback_data: str):
+        self.label = label
+        self.seconds = seconds
+        self.callback_data = callback_data
+    
+    def __repr__(self):
+        return f"ExpirationType({self.label}, {self.seconds}s)"
+    
+    def __eq__(self, other):
+        if isinstance(other, ExpirationType):
+            return self.callback_data == other.callback_data
+        return False
+
+
+# Create ExpirationType instances for all expiration options
+EXPIRATION_5S = ExpirationType("5s", 5, "exp_5s")
+EXPIRATION_15S = ExpirationType("15s", 15, "exp_15s")
+EXPIRATION_1M = ExpirationType("1m", 60, "exp_1m")
+EXPIRATION_2M = ExpirationType("2m", 120, "exp_2m")
+EXPIRATION_3M = ExpirationType("3m", 180, "exp_3m")
+EXPIRATION_5M = ExpirationType("5m", 300, "exp_5m")
+EXPIRATION_15M = ExpirationType("15m", 900, "exp_15m")
+EXPIRATION_30M = ExpirationType("30m", 1800, "exp_30m")
+
+ALL_EXPIRATIONS = [
+    EXPIRATION_5S, EXPIRATION_15S, EXPIRATION_1M, EXPIRATION_2M,
+    EXPIRATION_3M, EXPIRATION_5M, EXPIRATION_15M, EXPIRATION_30M
+]
+
+
+@dataclass
+class TradingSession:
+    """Tracks a user's trading session state."""
+    user_id: int
+    chat_id: int
+    state: BotState = BotState.IDLE
+    active_asset: Optional[str] = None
+    expiration: Optional[ExpirationType] = None
+    signal_history: list = field(default_factory=list)
+    created_at: datetime = field(default_factory=datetime.now)
+    last_activity: datetime = field(default_factory=datetime.now)
+    
+    def update_activity(self):
+        """Update last activity timestamp."""
+        self.last_activity = datetime.now()
+    
+    def add_signal(self, signal_data: dict):
+        """Add a signal to history."""
+        self.signal_history.append({
+            **signal_data,
+            'timestamp': datetime.now().timestamp()
+        })
 
 
 # ============================================
@@ -429,13 +493,20 @@ class TelegramTradingBot:
             await self._application.start()
             logger.info(f"Telegram bot using webhook: {webhook_path}")
         else:
-            # Use polling mode
+            # Use polling mode - in python-telegram-bot v20.x use run_polling
             try:
+                # Create a task to process updates from the queue
+                async def process_updates():
+                    async for update in self._application.stream():
+                        await self._application.process_update(update)
+                
+                # Start polling using the built-in method
                 await self._application.start()
-                await self._application.updater.start_polling(
-                    drop_pending_updates=True
-                )
-                logger.info("Telegram bot using polling mode")
+                logger.info("Telegram bot using polling mode (started)")
+                
+                # Run update processing in background
+                asyncio.create_task(process_updates())
+                
             except Exception as e:
                 logger.warning(f"Polling error: {e}")
                 logger.info("Falling back to no polling - use webhook mode for production")
@@ -465,11 +536,12 @@ class TelegramTradingBot:
             self._contexts.clear()
         
         if self._application:
+            # In python-telegram-bot v20.x, just call stop() directly
+            # No need for updater attribute
             try:
-                await self._application.updater.stop()
-            except Exception:
-                pass
-            await self._application.stop()
+                await self._application.stop()
+            except Exception as e:
+                logger.warning(f"Error stopping application: {e}")
         self._connected = False
         logger.info("Telegram bot stopped")
     

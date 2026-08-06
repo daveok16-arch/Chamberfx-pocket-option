@@ -18,7 +18,7 @@ from telegram.ext import (
     ContextTypes
 )
 
-from telegram_bot import TelegramTradingBot, ExpirationType
+from telegram_bot import TelegramTradingBot, ExpirationType, OTC_PAYOUTS
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,36 +34,10 @@ async def main():
     
     logger.info("Starting standalone Telegram bot...")
     
-    # Create bot
-    bot = TelegramTradingBot(token=token)
+    # Create bot - pass None for trading_engine since we're testing keyboard only
+    bot = TelegramTradingBot(token=token, trading_engine=None)
     
-    # Set up demo signal callback
-    async def demo_signal_callback(chat_id: int, expiration: ExpirationType):
-        logger.info(f"Signal requested for {chat_id} with {expiration.label}")
-        
-        # Simulate analysis
-        await asyncio.sleep(2)
-        
-        # Send demo signal
-        await bot.send_signal(
-            chat_id=chat_id,
-            asset_id="EURUSD_otc",
-            direction="CALL",
-            entry_price=1.15178,
-            confidence=85,
-            time_remaining=45,
-            expiration=expiration.label,
-            reasons=[
-                "EMA 9 > EMA 21 (bullish crossover)",
-                "RSI oversold (28.5)",
-                "Price near lower Bollinger band",
-                "Strong momentum detected"
-            ]
-        )
-    
-    bot.on_signal_callback = demo_signal_callback
-    
-    # Start
+    # Start in polling mode (no webhook needed for testing)
     await bot.start()
     
     logger.info("Bot is running. Press Ctrl+C to stop.")

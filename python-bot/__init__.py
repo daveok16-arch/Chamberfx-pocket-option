@@ -25,42 +25,58 @@ Usage:
 __version__ = "2.0.0"
 __author__ = "CHAMBERFX"
 
-from .tick_volume_bars import (
-    Tick,
-    TickVolumeBar,
-    TickVolumeBarBuilder,
-    MultiAssetTickVolumeEngine
-)
+# Import using absolute imports (works when installed as package)
+# Note: For direct script execution, use explicit imports instead
 
-from .micro_momentum import (
-    TVVReading,
-    MicroMomentumEngine,
-    MultiAssetMicroMomentum
-)
+def _lazy_import():
+    """Lazy import to avoid circular dependencies."""
+    global Tick, TickVolumeBar, TickVolumeBarBuilder, MultiAssetTickVolumeEngine
+    global TVVReading, MicroMomentumEngine, MultiAssetMicroMomentum
+    global IndicatorResult, TechnicalIndicatorPipeline
+    global PriceUpdate, PocketOptionClient
+    global TelegramTradingBot, ExpirationType, SignalFormatter, BotState, TradingSession, MenuState
+    global TradingSignal, TradeResult, TradingEngine
+    
+    from tick_volume_bars import (
+        Tick,
+        TickVolumeBar,
+        TickVolumeBarBuilder,
+        MultiAssetTickVolumeEngine
+    )
+    
+    from micro_momentum import (
+        TVVReading,
+        MicroMomentumEngine,
+        MultiAssetMicroMomentum
+    )
+    
+    from indicators import (
+        IndicatorResult,
+        TechnicalIndicatorPipeline
+    )
+    
+    from pocket_option_client import (
+        PriceUpdate,
+        PocketOptionClient
+    )
+    
+    from telegram_bot import (
+        TelegramTradingBot,
+        ExpirationType,
+        SignalFormatter,
+        BotState,
+        TradingSession,
+        MenuState
+    )
+    
+    from trading_engine import (
+        TradingSignal,
+        TradeResult,
+        TradingEngine
+    )
 
-from .indicators import (
-    IndicatorResult,
-    TechnicalIndicatorPipeline
-)
-
-from .pocket_option_client import (
-    PriceUpdate,
-    PocketOptionClient
-)
-
-from .telegram_bot import (
-    TelegramTradingBot,
-    ExpirationType,
-    SignalFormatter,
-    BotState,
-    TradingSession
-)
-
-from .trading_engine import (
-    TradingSignal,
-    TradeResult,
-    TradingEngine
-)
+# For backward compatibility - trigger lazy import
+_lazy_import()
 
 __all__ = [
     # Tick-Volume Bars
@@ -88,6 +104,7 @@ __all__ = [
     'SignalFormatter',
     'BotState',
     'TradingSession',
+    'MenuState',
     
     # Trading Engine
     'TradingSignal',
