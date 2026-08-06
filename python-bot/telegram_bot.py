@@ -774,7 +774,7 @@ class TelegramTradingBot:
         
         # Step 4: Auto-advance to expiration menu
         text, keyboard = self.formatter.format_expiration_menu(asset_display)
-        await query.message.edit_message_text(
+        await query.message.edit_text(
             text=text,
             reply_markup=keyboard,
             parse_mode='HTML'
@@ -801,7 +801,7 @@ class TelegramTradingBot:
         ctx.active_asset = None
         
         text, keyboard = self.formatter.format_otc_menu()
-        await query.message.edit_message_text(
+        await query.message.edit_text(
             text=text,
             reply_markup=keyboard,
             parse_mode='HTML'
@@ -836,7 +836,7 @@ class TelegramTradingBot:
         )
         
         # Show analysis message (buttons cleared)
-        await query.message.edit_message_text(
+        await query.message.edit_text(
             text=self.formatter.format_analysis_started(expiration_label, asset_display),
             parse_mode='HTML'
         )
@@ -866,7 +866,7 @@ class TelegramTradingBot:
             ctx.state = MenuState.EXPIRATION_SELECTION
             asset_display = self._get_asset_display(ctx.active_asset)
             text, keyboard = self.formatter.format_expiration_menu(asset_display)
-            await query.message.edit_message_text(
+            await query.message.edit_text(
                 text=text,
                 reply_markup=keyboard,
                 parse_mode='HTML'
@@ -883,7 +883,7 @@ class TelegramTradingBot:
             ctx.state = MenuState.EXPIRATION_SELECTION
             asset_display = self._get_asset_display(ctx.active_asset)
             text, keyboard = self.formatter.format_expiration_menu(asset_display)
-            await query.message.edit_message_text(
+            await query.message.edit_text(
                 text=text,
                 reply_markup=keyboard,
                 parse_mode='HTML'
