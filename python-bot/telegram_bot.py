@@ -542,29 +542,25 @@ class TelegramTradingBot:
         self._update_started.set()
         
         try:
-            logger.info(f"[TG] Waiting for updates... (connected={self._connected}, app={self._application is not None})")
+            logger.info(f"[TG] Update processor ready (connected={self._connected})")
             
             # In python-telegram-bot v20.x, updates are put in the queue as dicts
             # This task consumes them, converts to Update objects, and processes
             while self._connected and self._application:
                 try:
                     # Get updates from the queue with timeout
-                    logger.info("[TG] About to get from queue...")
                     data = await asyncio.wait_for(
                         self._application.update_queue.get(),
                         timeout=5.0
                     )
-                    logger.info(f"[TG] Received update from queue: {type(data).__name__}, keys={list(data.keys()) if isinstance(data, dict) else 'N/A'}")
                     
                     # Convert dict to Update object if needed
                     if isinstance(data, dict):
                         update = Update.de_json(data, self._application.bot)
-                        logger.info(f"[TG] Converted dict to Update: {update.update_id}")
                     else:
                         update = data
                     
                     await self._application.process_update(update)
-                    logger.info(f"[TG] Processed update: {update.update_id}")
                     
                 except asyncio.TimeoutError:
                     # No update in queue, continue waiting
@@ -714,7 +710,6 @@ class TelegramTradingBot:
         Routes based on callback_data prefix.
         Includes input validation and sanitization.
         """
-        logger.info(f"[TG] Received callback query: {update}")
         query = update.callback_query
         if not query:
             logger.warning("[TG] No callback query in update")
