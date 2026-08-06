@@ -829,9 +829,9 @@ class TelegramTradingBot:
         ctx.selected_seconds = expiration_seconds
         ctx.state = MenuState.ANALYZING
         
-        # Get asset display name
+        # Get asset display name (OTC_PAIRS has 3 elements: id, name, emoji)
         asset_display = next(
-            (display for aid, display in OTC_PAIRS if aid == ctx.active_asset),
+            (f"{name} ({OTC_PAYOUTS.get(aid, 85)}%)" for aid, name, emoji in OTC_PAIRS if aid == ctx.active_asset),
             ctx.active_asset or "Unknown"
         )
         
