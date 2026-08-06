@@ -522,24 +522,34 @@ class TelegramTradingBot:
         """Background task to process updates from the queue."""
         logger.info("[TG] Update processor started")
         try:
-            # In python-telegram-bot v20.x, updates are put in the queue
-            # This task consumes them and processes them
+            # In python-telegram-bot v20.x, updates are put in the queue as dicts
+            # This task consumes them, converts to Update objects, and processes
             while self._connected and self._application:
                 try:
                     # Get updates from the queue with timeout
-                    update = await asyncio.wait_for(
+                    data = await asyncio.wait_for(
                         self._application.update_queue.get(),
                         timeout=1.0
                     )
-                    logger.info(f"[TG] Processing update: {type(update).__name__}")
+                    logger.info(f"[TG] Received update data: {type(data).__name__}")
+                    
+                    # Convert dict to Update object if needed
+                    if isinstance(data, dict):
+                        update = Update.de_json(data, self._application.bot)
+                        logger.info(f"[TG] Converted dict to Update: {update.update_id}")
+                    else:
+                        update = data
+                    
                     await self._application.process_update(update)
+                    logger.info(f"[TG] Processed update: {update.update_id}")
+                    
                 except asyncio.TimeoutError:
                     # No update in queue, continue waiting
                     continue
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
-                    logger.error(f"[TG] Error processing update: {e}")
+                    logger.error(f"[TG] Error processing update: {e}", exc_info=True)
                     continue
         except asyncio.CancelledError:
             pass
