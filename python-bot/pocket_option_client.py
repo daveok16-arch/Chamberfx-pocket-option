@@ -511,7 +511,10 @@ class PocketOptionClient:
     async def _handle_price_update(self, data) -> None:
         """Handle price update from stream."""
         if not isinstance(data, list):
+            logger.warning(f"[WS] Price update data is not a list: {type(data)}, data={data}")
             return
+        
+        logger.info(f"[WS] Price update: {len(data)} items")
         
         for item in data:
             if not isinstance(item, list) or len(item) < 2:
@@ -554,6 +557,7 @@ class PocketOptionClient:
             if self._on_tick:
                 try:
                     self._on_tick(update)
+                    logger.info(f"[TICK] Callback fired for {asset_id}: {price}")
                 except Exception as e:
                     logger.error(f"[TICK] Callback error: {e}")
             
