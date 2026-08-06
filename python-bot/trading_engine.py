@@ -132,6 +132,10 @@ class TradingEngine:
         """Set callback for new signals."""
         self._on_signal = callback
     
+    async def _on_connection_status(self, status: str, is_connected: bool) -> None:
+        """Handle connection status changes."""
+        logger.info(f"[ENGINE] Connection status: {status} (connected={is_connected})")
+    
     async def start(self) -> None:
         """Start the trading engine."""
         logger.info("=" * 50)
@@ -144,6 +148,7 @@ class TradingEngine:
         self.po_client.set_tick_callback(self._on_tick)
         self.po_client.set_bar_callback(self._on_bar_complete)
         self.po_client.set_tvv_callback(self._on_tvv)
+        self.po_client.set_connection_status_callback(self._on_connection_status)
         
         # Discover Pocket Option session (Playwright)
         logger.info("[ENGINE] Discovering Pocket Option session...")

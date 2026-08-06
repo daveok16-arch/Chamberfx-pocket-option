@@ -68,6 +68,13 @@ class PocketOptionClient:
         self._connected = False
         self._authenticated = False
         self._running = False
+        self._reconnect_attempts = 0
+        self._max_reconnect_attempts = 10
+        self._base_reconnect_delay = 5  # seconds
+        self._max_reconnect_delay = 60  # seconds
+        
+        # Message handler task
+        self._message_handler_task: Optional[asyncio.Task] = None
         
         # Heartbeat
         self._heartbeat_task: Optional[asyncio.Task] = None
@@ -76,9 +83,14 @@ class PocketOptionClient:
         self._on_tick: Optional[Callable[[PriceUpdate], None]] = None
         self._on_bar_complete: Optional[Callable[[str, TickVolumeBar], None]] = None
         self._on_tvv: Optional[Callable[[str, TVVReading], None]] = None
+        self._on_connection_status: Optional[Callable[[str, bool], None]] = None  # (status, is_connected)
         
         # Price tracking
         self._last_prices: Dict[str, float] = {}
+        
+        # Tick counter for debugging
+        self._tick_count = 0
+        self._last_tick_time: Optional[float] = None
         
         # Tick-volume bars
         self._bar_builders: Dict[str, 'TickVolumeBarBuilder'] = {}
@@ -98,6 +110,29 @@ class PocketOptionClient:
     @property
     def authenticated(self) -> bool:
         return self._authenticated
+    
+    def set_connection_status_callback(self, callback: Callable[[str, bool], None]) -> None:
+        """Set callback for connection status changes."""
+        self._on_connection_status = callback
+    
+    async def _notify_connection_status(self, status: str, is_connected: bool) -> None:
+        """Notify listeners of connection status changes."""
+        if self._on_connection_status:
+            try:
+                self._on_connection_status(status, is_connected)
+            except Exception as e:
+                logger.error(f"[CONN] Status callback error: {e}")
+    
+    def _calculate_reconnect_delay(self) -> float:
+        """Calculate exponential backoff delay."""
+        delay = min(
+            self._base_reconnect_delay * (2 ** self._reconnect_attempts),
+            self._max_reconnect_delay
+        )
+        # Add jitter (±20%)
+        import random
+        jitter = delay * 0.2 * (random.random() * 2 - 1)
+        return delay + jitter
     
     def set_tick_callback(
         self, 
@@ -276,73 +311,136 @@ class PocketOptionClient:
     
     async def connect(self) -> bool:
         """
-        Connect to Pocket Option WebSocket.
+        Connect to Pocket Option WebSocket with automatic reconnection.
         Uses Playwright session discovery to get auth packet.
         """
         if not self._ws_url:
             await self.discover_session()
         
-        try:
-            logger.info(f"[WS] Connecting to {self._ws_url[:60]}...")
+        self._running = True
+        self._reconnect_attempts = 0
+        
+        while self._running:
+            try:
+                logger.info(f"[WS] Connecting to {self._ws_url[:60]}... (attempt {self._reconnect_attempts + 1})")
+                
+                # Build headers with cookies
+                headers = {
+                    "Origin": "https://po.trade",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                }
+                
+                # Connect
+                self._ws = await websockets.connect(
+                    self._ws_url,
+                    extra_headers=headers,
+                    max_size=20 * 1024 * 1024,
+                    ping_interval=20,
+                    ping_timeout=10
+                )
+                
+                self._connected = True
+                self._reconnect_attempts = 0  # Reset on successful connection
+                logger.info("[WS] Connected, starting handlers...")
+                
+                # Start message handler (and keep reference to cancel it later)
+                self._message_handler_task = asyncio.create_task(self._message_handler())
+                
+                # Start heartbeat
+                self._heartbeat_task = asyncio.create_task(self._heartbeat())
+                
+                # Notify connected
+                await self._notify_connection_status("connected", True)
+                
+                logger.info("[WS] Connection established, waiting for auth...")
+                
+                # Wait for auth (with timeout)
+                auth_timeout = 15
+                for i in range(auth_timeout):
+                    await asyncio.sleep(1)
+                    if self._authenticated:
+                        logger.info("[WS] Authentication confirmed")
+                        await self._notify_connection_status("authenticated", True)
+                        break
+                    if not self._running:
+                        break
+                
+                # Wait for the connection to close
+                while self._running and self._connected:
+                    try:
+                        # Sleep in small increments to check _running flag
+                        await asyncio.sleep(1)
+                    except asyncio.CancelledError:
+                        break
+                
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.warning(f"[WS] Connection closed: {e.code} - {e.reason}")
+                await self._notify_connection_status("disconnected", False)
+            except asyncio.CancelledError:
+                logger.info("[WS] Connection cancelled")
+                break
+            except Exception as e:
+                logger.error(f"[WS] Connection error: {e}")
+                await self._notify_connection_status("error", False)
             
-            # Build headers with cookies
-            headers = {
-                "Origin": "https://po.trade",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-            
-            # Connect
-            self._ws = await websockets.connect(
-                self._ws_url,
-                extra_headers=headers,
-                max_size=20 * 1024 * 1024
-            )
-            
-            self._running = True
-            
-            logger.info("[WS] Connected, starting handlers...")
-            
-            # Start message handler
-            asyncio.create_task(self._message_handler())
-            
-            # Start heartbeat
-            self._heartbeat_task = asyncio.create_task(self._heartbeat())
-            
-            # Set connected immediately - auth happens in background
-            self._connected = True
-            logger.info("[WS] Connection established, waiting for auth...")
-            
-            # Wait for auth (with timeout)
-            auth_timeout = 10
-            for _ in range(auth_timeout):
-                await asyncio.sleep(1)
-                if self._authenticated:
-                    logger.info("[WS] Authentication confirmed")
-                    break
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"[WS] Connection failed: {e}")
-            self._connected = False
-            return False
+            # Handle reconnection
+            if self._running and self._reconnect_attempts < self._max_reconnect_attempts:
+                self._reconnect_attempts += 1
+                delay = self._calculate_reconnect_delay()
+                logger.info(f"[WS] Reconnecting in {delay:.1f} seconds... (attempt {self._reconnect_attempts}/{self._max_reconnect_attempts})")
+                
+                # Wait before reconnecting
+                for _ in range(int(delay)):
+                    if not self._running:
+                        break
+                    await asyncio.sleep(1)
+            elif self._running:
+                logger.error(f"[WS] Max reconnection attempts ({self._max_reconnect_attempts}) reached, giving up")
+                await self._notify_connection_status("failed", False)
+                break
+        
+        self._connected = False
+        self._authenticated = False
+        return self._authenticated
     
     async def disconnect(self) -> None:
         """Disconnect from WebSocket."""
+        logger.info("[WS] Disconnecting...")
         self._running = False
+        self._connected = False
+        self._authenticated = False
         
+        # Cancel message handler task
+        if self._message_handler_task:
+            self._message_handler_task.cancel()
+            try:
+                await self._message_handler_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.debug(f"[WS] Message handler cancel error: {e}")
+            self._message_handler_task = None
+        
+        # Cancel heartbeat task
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
             try:
                 await self._heartbeat_task
             except asyncio.CancelledError:
                 pass
+            except Exception as e:
+                logger.debug(f"[WS] Heartbeat cancel error: {e}")
+            self._heartbeat_task = None
         
+        # Close WebSocket
         if self._ws:
-            await self._ws.close()
+            try:
+                await self._ws.close()
+            except Exception as e:
+                logger.debug(f"[WS] WebSocket close error: {e}")
+            self._ws = None
         
-        self._connected = False
-        self._authenticated = False
+        await self._notify_connection_status("disconnected", False)
         logger.info("[WS] Disconnected")
     
     async def subscribe_assets(self) -> None:
@@ -553,11 +651,20 @@ class PocketOptionClient:
                 direction=direction
             )
             
+            # Track tick
+            self._tick_count += 1
+            self._last_tick_time = timestamp
+            
+            # Log first few ticks for debugging, then periodically
+            if self._tick_count <= 10:
+                logger.info(f"[TICK] #{self._tick_count} {asset_id}: {price:.5f} ({direction})")
+            elif self._tick_count % 100 == 0:
+                logger.info(f"[TICK] #{self._tick_count} {asset_id}: {price:.5f} ({direction})")
+            
             # Fire tick callback
             if self._on_tick:
                 try:
                     self._on_tick(update)
-                    logger.info(f"[TICK] Callback fired for {asset_id}: {price}")
                 except Exception as e:
                     logger.error(f"[TICK] Callback error: {e}")
             
