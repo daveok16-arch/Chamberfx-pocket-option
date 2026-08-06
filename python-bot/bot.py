@@ -78,7 +78,7 @@ async def start_trading_engine(app):
         logger.error("TELEGRAM_TOKEN environment variable is required")
         return
     
-    min_confidence = int(os.getenv("MIN_CONFIDENCE", "70"))
+    min_confidence = int(os.getenv("MIN_CONFIDENCE", "60"))
     tick_threshold = int(os.getenv("TICK_THRESHOLD", "175"))
     
     # Auto-detect webhook URL from Render's environment

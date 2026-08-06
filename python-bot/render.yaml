@@ -16,6 +16,6 @@ services:
       - key: LOG_LEVEL
         value: INFO
       - key: MIN_CONFIDENCE
-        value: "70"
+        value: "60"
       - key: TICK_THRESHOLD
         value: "175"
