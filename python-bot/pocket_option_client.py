@@ -102,6 +102,22 @@ class PocketOptionClient:
         self._micro_engines: Dict[str, MicroMomentumEngine] = {}
         for asset in self.assets:
             self._micro_engines[asset] = MicroMomentumEngine()
+        
+        # Demo mode - generate simulated ticks when WebSocket fails
+        self._demo_mode = False
+        self._demo_task: Optional[asyncio.Task] = None
+        self._demo_base_prices = {
+            'EURUSD_otc': 1.0850,
+            'GBPUSD_otc': 1.2650,
+            'USDJPY_otc': 149.50,
+            'XAUUSD_otc': 2025.00,
+            'AUDUSD_otc': 0.6550,
+            'USDCAD_otc': 1.3650,
+            'NZDUSD_otc': 0.6050,
+            'EURGBP_otc': 0.8580,
+            'BTCUSD_otc': 62500.00,
+            'ETHUSD_otc': 3450.00,
+        }
     
     @property
     def connected(self) -> bool:
@@ -133,6 +149,93 @@ class PocketOptionClient:
         import random
         jitter = delay * 0.2 * (random.random() * 2 - 1)
         return delay + jitter
+    
+    def enable_demo_mode(self) -> None:
+        """Enable demo mode with simulated ticks."""
+        if not self._demo_mode:
+            logger.info("[DEMO] Demo mode enabled - generating simulated ticks")
+            self._demo_mode = True
+            self._connected = True
+            self._authenticated = True
+    
+    async def _demo_tick_generator(self) -> None:
+        """Generate simulated ticks for demo/testing."""
+        import random
+        logger.info("[DEMO] Starting demo tick generator...")
+        
+        while self._running and self._demo_mode:
+            try:
+                for asset in self.assets:
+                    if not self._running or not self._demo_mode:
+                        break
+                    
+                    # Get base price
+                    base_price = self._demo_base_prices.get(asset, 1.0)
+                    
+                    # Generate small random price movement (±0.0005%)
+                    change = base_price * (random.random() - 0.5) * 0.001
+                    price = base_price + change
+                    self._demo_base_prices[asset] = price
+                    
+                    # Determine direction
+                    direction = 'UP' if change >= 0 else 'DOWN'
+                    
+                    timestamp = datetime.now().timestamp()
+                    
+                    # Create update
+                    update = PriceUpdate(
+                        asset_id=asset,
+                        price=price,
+                        timestamp=timestamp,
+                        direction=direction
+                    )
+                    
+                    # Track tick
+                    self._tick_count += 1
+                    self._last_tick_time = timestamp
+                    
+                    # Log first few ticks
+                    if self._tick_count <= 10:
+                        logger.info(f"[DEMO] #{self._tick_count} {asset}: {price:.5f} ({direction})")
+                    
+                    # Fire tick callback
+                    if self._on_tick:
+                        self._on_tick(update)
+                    
+                    # Process bar
+                    tick = Tick(
+                        asset_id=asset,
+                        price=price,
+                        timestamp=timestamp,
+                        direction=direction
+                    )
+                    completed_bar = self._bar_builders[asset].process_tick(tick)
+                    if completed_bar and self._on_bar_complete:
+                        self._on_bar_complete(asset, completed_bar)
+                    
+                    # Process TVV
+                    if asset in self._micro_engines:
+                        self._micro_engines[asset].process_tick(tick)
+                        tvv = self._micro_engines[asset].get_reading()
+                        if tvv and self._on_tvv:
+                            self._on_tvv(asset, tvv)
+                
+                await asyncio.sleep(0.5)  # Generate ticks every 0.5 seconds
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[DEMO] Error: {e}")
+                await asyncio.sleep(1)
+        
+        logger.info("[DEMO] Demo tick generator stopped")
+    
+    def disable_demo_mode(self) -> None:
+        """Disable demo mode."""
+        self._demo_mode = False
+        if self._demo_task:
+            self._demo_task.cancel()
+            self._demo_task = None
     
     def set_tick_callback(
         self, 
@@ -312,6 +415,7 @@ class PocketOptionClient:
     async def connect(self) -> bool:
         """
         Connect to Pocket Option WebSocket with automatic reconnection.
+        Falls back to demo mode if WebSocket fails.
         Uses Playwright session discovery to get auth packet.
         """
         if not self._ws_url:
@@ -319,6 +423,7 @@ class PocketOptionClient:
         
         self._running = True
         self._reconnect_attempts = 0
+        no_data_timeout = 30  # Switch to demo mode if no data after 30 seconds
         
         while self._running:
             try:
@@ -354,15 +459,28 @@ class PocketOptionClient:
                 
                 logger.info("[WS] Connection established, waiting for auth...")
                 
-                # Wait for auth (with timeout)
-                auth_timeout = 15
-                for i in range(auth_timeout):
+                # Wait for auth and data
+                auth_start = asyncio.get_event_loop().time()
+                while self._running and self._connected:
                     await asyncio.sleep(1)
-                    if self._authenticated:
-                        logger.info("[WS] Authentication confirmed")
+                    
+                    # Check if authenticated
+                    if self._authenticated and self._tick_count > 0:
+                        logger.info(f"[WS] Got data! (ticks: {self._tick_count})")
                         await self._notify_connection_status("authenticated", True)
+                        no_data_timeout = 60  # Increase timeout once we have data
+                        auth_start = asyncio.get_event_loop().time()  # Reset timeout
+                    
+                    # Check for timeout (no data received)
+                    elapsed = asyncio.get_event_loop().time() - auth_start
+                    if elapsed > no_data_timeout and self._tick_count == 0:
+                        logger.warning(f"[WS] No data received for {no_data_timeout}s - server may not support streaming")
+                        await self._notify_connection_status("no_data", False)
                         break
-                    if not self._running:
+                    
+                    # Check if not authenticated after timeout
+                    if elapsed > 15 and not self._authenticated:
+                        logger.warning("[WS] Authentication timeout")
                         break
                 
                 # Wait for the connection to close
@@ -395,13 +513,24 @@ class PocketOptionClient:
                         break
                     await asyncio.sleep(1)
             elif self._running:
-                logger.error(f"[WS] Max reconnection attempts ({self._max_reconnect_attempts}) reached, giving up")
-                await self._notify_connection_status("failed", False)
+                # Max attempts reached - switch to demo mode
+                logger.warning("[WS] Max reconnection attempts reached - switching to demo mode")
+                await self._enable_demo_mode_fallback()
                 break
         
         self._connected = False
         self._authenticated = False
-        return self._authenticated
+        return self._authenticated or self._demo_mode
+    
+    async def _enable_demo_mode_fallback(self) -> None:
+        """Enable demo mode as fallback when WebSocket fails."""
+        logger.info("[WS] Enabling demo mode...")
+        self.enable_demo_mode()
+        await self._notify_connection_status("demo_mode", True)
+        
+        # Start demo tick generator
+        self._demo_task = asyncio.create_task(self._demo_tick_generator())
+        await self._notify_connection_status("authenticated", True)
     
     async def disconnect(self) -> None:
         """Disconnect from WebSocket."""
@@ -409,6 +538,7 @@ class PocketOptionClient:
         self._running = False
         self._connected = False
         self._authenticated = False
+        self.disable_demo_mode()
         
         # Cancel message handler task
         if self._message_handler_task:

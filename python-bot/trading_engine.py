@@ -155,20 +155,28 @@ class TradingEngine:
         if not await self.po_client.discover_session():
             logger.error("[ENGINE] Failed to discover Pocket Option session")
         
-        # Connect to Pocket Option
-        logger.info("[ENGINE] Connecting to Pocket Option...")
-        if not await self.po_client.connect():
-            logger.error("[ENGINE] Failed to connect to Pocket Option")
-        
-        # Wait a moment for connection to establish
-        await asyncio.sleep(3)
-        
-        # Start Telegram bot (use webhook if URL provided)
+        # Start Telegram bot FIRST (use webhook if URL provided)
+        # This ensures bot is ready to receive messages
         logger.info("[ENGINE] Starting Telegram bot...")
         if self.webhook_url:
             await self.telegram.start(webhook_url=self.webhook_url)
         else:
             await self.telegram.start()
+        
+        # Start WebSocket connection in BACKGROUND (doesn't block)
+        # The connect() method handles reconnection internally
+        logger.info("[ENGINE] Connecting to Pocket Option...")
+        asyncio.create_task(self.po_client.connect())
+        
+        # Wait for initial connection
+        logger.info("[ENGINE] Waiting for Pocket Option connection...")
+        for _ in range(30):  # Wait up to 30 seconds
+            await asyncio.sleep(1)
+            if self.po_client.connected and self.po_client.authenticated:
+                logger.info("[ENGINE] Pocket Option connected and authenticated")
+                break
+            if not self._running:
+                break
         
         logger.info("[ENGINE] All systems online")
     
