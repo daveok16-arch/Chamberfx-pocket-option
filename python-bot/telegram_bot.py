@@ -417,6 +417,7 @@ class TelegramTradingBot:
         # Telegram app
         self._application: Optional[Application] = None
         self._connected = False
+        self._ready = False
         
         # Formatter
         self.formatter = SignalFormatter()
@@ -427,6 +428,11 @@ class TelegramTradingBot:
     @property
     def connected(self) -> bool:
         return self._connected
+    
+    @property
+    def ready(self) -> bool:
+        """Check if the bot is fully initialized and ready to process updates."""
+        return self._ready and self._connected and self._application is not None
     
     async def get_context(self, user_id: int) -> UserContext:
         """
@@ -482,37 +488,55 @@ class TelegramTradingBot:
         # Initialize app
         await self._application.initialize()
         
+        # Start the application
+        await self._application.start()
+        
         if webhook_url:
-            # Use webhook mode - set webhook and start processing
+            # Use webhook mode - set webhook
             webhook_path = f"{webhook_url}/telegram"
             await self._application.bot.set_webhook(
                 webhook_path,
                 drop_pending_updates=True
             )
-            # Start the application to process incoming updates from queue
-            await self._application.start()
             logger.info(f"Telegram bot using webhook: {webhook_path}")
         else:
-            # Use polling mode - in python-telegram-bot v20.x use run_polling
-            try:
-                # Create a task to process updates from the queue
-                async def process_updates():
-                    async for update in self._application.stream():
-                        await self._application.process_update(update)
-                
-                # Start polling using the built-in method
-                await self._application.start()
-                logger.info("Telegram bot using polling mode (started)")
-                
-                # Run update processing in background
-                asyncio.create_task(process_updates())
-                
-            except Exception as e:
-                logger.warning(f"Polling error: {e}")
-                logger.info("Falling back to no polling - use webhook mode for production")
+            # Use polling mode
+            logger.info("Telegram bot using polling mode")
+        
+        # Start the update processing task
+        asyncio.create_task(self._process_updates())
         
         self._connected = True
+        self._ready = True  # Mark bot as ready to process updates
         logger.info("Telegram bot started successfully")
+    
+    async def _process_updates(self) -> None:
+        """Background task to process updates from the queue."""
+        try:
+            # In python-telegram-bot v20.x, updates are put in the queue
+            # This task consumes them and processes them
+            while self._connected and self._application:
+                try:
+                    # Get updates from the queue with timeout
+                    update = await asyncio.wait_for(
+                        self._application.update_queue.get(),
+                        timeout=1.0
+                    )
+                    await self._application.process_update(update)
+                except asyncio.TimeoutError:
+                    # No update in queue, continue waiting
+                    continue
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"Error processing update: {e}")
+                    continue
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Process updates error: {e}")
+        finally:
+            logger.info("Update processing task ended")
     
     async def process_webhook_update(self, data: dict) -> None:
         """Process an update received via webhook."""
@@ -521,6 +545,9 @@ class TelegramTradingBot:
     
     async def stop(self) -> None:
         """Stop the bot."""
+        self._ready = False
+        self._connected = False
+        
         # Cancel all analysis tasks safely
         async with self._tasks_lock:
             for user_id, task in list(self._analysis_tasks.items()):
@@ -536,13 +563,10 @@ class TelegramTradingBot:
             self._contexts.clear()
         
         if self._application:
-            # In python-telegram-bot v20.x, just call stop() directly
-            # No need for updater attribute
             try:
                 await self._application.stop()
             except Exception as e:
                 logger.warning(f"Error stopping application: {e}")
-        self._connected = False
         logger.info("Telegram bot stopped")
     
     def _get_asset_display(self, asset_id: str) -> str:

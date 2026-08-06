@@ -41,12 +41,20 @@ async def telegram_webhook_handler(request):
     global _telegram_bot
     try:
         data = await request.json()
-        if _telegram_bot and _telegram_bot._application:
-            await _telegram_bot._application.update_queue.put(data)
-            return web.Response(text="OK", status=200)
-        else:
-            logger.warning("Telegram bot not ready yet")
-            return web.Response(text="Bot not ready", status=503)
+        
+        # Wait for bot to be ready (with timeout)
+        max_wait = 30  # seconds
+        waited = 0
+        while not (_telegram_bot and _telegram_bot.ready):
+            await asyncio.sleep(0.1)
+            waited += 0.1
+            if waited > max_wait:
+                logger.warning("Telegram bot not ready after waiting")
+                return web.Response(text="Bot not ready", status=503)
+        
+        # Bot is ready, process the update
+        await _telegram_bot._application.update_queue.put(data)
+        return web.Response(text="OK", status=200)
     except Exception as e:
         logger.error(f"Telegram webhook error: {e}")
         return web.Response(text="Error", status=500)
