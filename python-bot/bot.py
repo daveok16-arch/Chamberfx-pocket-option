@@ -41,8 +41,10 @@ async def telegram_webhook_handler(request):
     global _telegram_bot
     try:
         data = await request.json()
-        message_text = data.get('message', {}).get('text', 'N/A')
-        callback_data = data.get('callback_query', {}).get('data', 'N/A')
+        msg = data.get('message', {})
+        cb = data.get('callback_query', {})
+        message_text = msg.get('text', 'N/A') if isinstance(msg, dict) else 'N/A'
+        callback_data = cb.get('data', 'N/A') if isinstance(cb, dict) else 'N/A'
         logger.info(f"[WEBHOOK] Received: msg={message_text}, callback={callback_data}")
         
         # Wait for bot to be ready (with timeout)
