@@ -542,17 +542,19 @@ class TelegramTradingBot:
         self._update_started.set()
         
         try:
-            logger.info(f"[TG] Update processor ready (connected={self._connected})")
+            logger.info(f"[TG] Update processor ready, waiting for updates... (queue_size={self._application.update_queue.qsize()})")
             
             # In python-telegram-bot v20.x, updates are put in the queue as dicts
             # This task consumes them, converts to Update objects, and processes
             while self._connected and self._application:
                 try:
                     # Get updates from the queue with timeout
+                    logger.debug(f"[TG] Queue size before get: {self._application.update_queue.qsize()}")
                     data = await asyncio.wait_for(
                         self._application.update_queue.get(),
                         timeout=5.0
                     )
+                    logger.info(f"[TG] Got update from queue, processing...")
                     
                     # Convert dict to Update object if needed
                     if isinstance(data, dict):
@@ -560,7 +562,9 @@ class TelegramTradingBot:
                     else:
                         update = data
                     
+                    logger.info(f"[TG] Processing update: {update.update_id}, has_message={update.message is not None}, has_callback={update.callback_query is not None}")
                     await self._application.process_update(update)
+                    logger.info(f"[TG] Update {update.update_id} processed successfully")
                     
                 except asyncio.TimeoutError:
                     # No update in queue, continue waiting
