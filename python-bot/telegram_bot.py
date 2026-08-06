@@ -509,9 +509,18 @@ class TelegramTradingBot:
         self._connected = True
         self._ready = True  # Mark bot as ready to process updates
         logger.info("Telegram bot started successfully")
+        
+        # Verify bot info and log it
+        try:
+            bot_info = await self._application.bot.get_me()
+            logger.info(f"[TG] Bot username: @{bot_info.username}")
+            logger.info(f"[TG] Bot is ready and waiting for messages!")
+        except Exception as e:
+            logger.error(f"[TG] Failed to get bot info: {e}")
     
     async def _process_updates(self) -> None:
         """Background task to process updates from the queue."""
+        logger.info("[TG] Update processor started")
         try:
             # In python-telegram-bot v20.x, updates are put in the queue
             # This task consumes them and processes them
@@ -522,6 +531,7 @@ class TelegramTradingBot:
                         self._application.update_queue.get(),
                         timeout=1.0
                     )
+                    logger.info(f"[TG] Processing update: {type(update).__name__}")
                     await self._application.process_update(update)
                 except asyncio.TimeoutError:
                     # No update in queue, continue waiting
@@ -529,14 +539,14 @@ class TelegramTradingBot:
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
-                    logger.error(f"Error processing update: {e}")
+                    logger.error(f"[TG] Error processing update: {e}")
                     continue
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.error(f"Process updates error: {e}")
+            logger.error(f"[TG] Process updates error: {e}")
         finally:
-            logger.info("Update processing task ended")
+            logger.info("[TG] Update processor stopped")
     
     async def process_webhook_update(self, data: dict) -> None:
         """Process an update received via webhook."""
@@ -583,12 +593,15 @@ class TelegramTradingBot:
     
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start - show OTC Asset Selection Hub."""
+        logger.info(f"[TG] /start command from user {update.effective_user.id}")
+        
         ctx = await self.get_context(update.effective_user.id)
         ctx.chat_id = update.effective_chat.id
         ctx.state = MenuState.ASSET_SELECTION
         
         text, keyboard = self.formatter.format_otc_menu()
         await update.message.reply_text(text, reply_markup=keyboard, parse_mode='HTML')
+        logger.info(f"[TG] Sent OTC menu to user {update.effective_user.id}")
     
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command."""
@@ -650,11 +663,15 @@ class TelegramTradingBot:
         Routes based on callback_data prefix.
         Includes input validation and sanitization.
         """
+        logger.info(f"[TG] Received callback query: {update}")
         query = update.callback_query
         if not query:
+            logger.warning("[TG] No callback query in update")
             return
         
         user_id = update.effective_user.id
+        logger.info(f"[TG] Processing callback from user {user_id}: {query.data}")
+        
         ctx = await self.get_context(user_id)
         ctx.chat_id = query.message.chat_id
         
@@ -667,7 +684,7 @@ class TelegramTradingBot:
             await query.answer("⚠️ Invalid input", show_alert=True)
             return
         
-        logger.info(f"[TG] Callback from {user_id}: {data}")
+        logger.info(f"[TG] Valid callback from {user_id}: {data}")
         
         try:
             # Stop loading spinner immediately
