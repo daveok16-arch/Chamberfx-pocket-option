@@ -419,6 +419,10 @@ class TelegramTradingBot:
         self._connected = False
         self._ready = False
         
+        # Update processor task tracking
+        self._update_processor_task: Optional[asyncio.Task] = None
+        self._update_started = asyncio.Event()
+        
         # Formatter
         self.formatter = SignalFormatter()
         
@@ -492,19 +496,24 @@ class TelegramTradingBot:
         await self._application.start()
         
         if webhook_url:
-            # Use webhook mode - set webhook
-            webhook_path = f"{webhook_url}/telegram"
-            await self._application.bot.set_webhook(
-                webhook_path,
-                drop_pending_updates=True
-            )
-            logger.info(f"Telegram bot using webhook: {webhook_path}")
+            # NOTE: We intentionally DO NOT call set_webhook() here.
+            # Instead, we use a custom webhook handler in bot.py (aiohttp web server)
+            # that receives Telegram updates and puts them into the application's update queue.
+            # This avoids conflicts between the custom handler and the library's webhook mechanism.
+            logger.info(f"Telegram bot using custom webhook handler at: {webhook_url}/telegram")
         else:
             # Use polling mode
             logger.info("Telegram bot using polling mode")
         
-        # Start the update processing task
-        asyncio.create_task(self._process_updates())
+        # Reset the update started event
+        self._update_started.clear()
+        
+        # Start the update processing task and STORE the reference
+        self._update_processor_task = asyncio.create_task(self._process_updates())
+        
+        # Wait for the task to actually start processing
+        # This prevents the race condition where webhooks arrive before the queue consumer is ready
+        await self._update_started.wait()
         
         self._connected = True
         self._ready = True  # Mark bot as ready to process updates
@@ -521,6 +530,11 @@ class TelegramTradingBot:
     async def _process_updates(self) -> None:
         """Background task to process updates from the queue."""
         logger.info("[TG] Update processor started")
+        
+        # Signal that we've started - this allows the start() method to continue
+        # only after the queue consumer is ready
+        self._update_started.set()
+        
         try:
             # In python-telegram-bot v20.x, updates are put in the queue as dicts
             # This task consumes them, converts to Update objects, and processes
@@ -568,6 +582,15 @@ class TelegramTradingBot:
         self._ready = False
         self._connected = False
         
+        # Cancel the update processor task
+        if self._update_processor_task:
+            self._update_processor_task.cancel()
+            try:
+                await self._update_processor_task
+            except asyncio.CancelledError:
+                pass
+            self._update_processor_task = None
+        
         # Cancel all analysis tasks safely
         async with self._tasks_lock:
             for user_id, task in list(self._analysis_tasks.items()):
@@ -587,6 +610,15 @@ class TelegramTradingBot:
                 await self._application.stop()
             except Exception as e:
                 logger.warning(f"Error stopping application: {e}")
+        
+        # Clean up webhook registration to avoid stale webhook on next start
+        try:
+            if self._application and self.token:
+                await self._application.bot.delete_webhook()
+                logger.info("[TG] Webhook deleted")
+        except Exception as e:
+            logger.warning(f"[TG] Error deleting webhook: {e}")
+        
         logger.info("Telegram bot stopped")
     
     def _get_asset_display(self, asset_id: str) -> str:

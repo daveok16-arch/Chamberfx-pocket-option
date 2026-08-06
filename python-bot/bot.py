@@ -61,7 +61,10 @@ async def telegram_webhook_handler(request):
         logger.info(f"[WEBHOOK] Feeding update to bot queue...")
         await _telegram_bot._application.update_queue.put(data)
         logger.info(f"[WEBHOOK] Update queued successfully")
-        return web.Response(text="OK", status=200)
+        
+        # Return update_id as per Telegram's webhook API requirements
+        update_id = data.get('update_id', 0)
+        return web.Response(text=str(update_id), status=200)
     except Exception as e:
         logger.error(f"[WEBHOOK] Telegram webhook error: {e}")
         return web.Response(text="Error", status=500)
@@ -86,7 +89,7 @@ async def start_trading_engine(app):
         # Try to auto-detect from Render environment
         render_url = os.getenv("RENDER_EXTERNAL_URL")
         if render_url:
-            webhook_url = render_url
+            webhook_url = render_url.rstrip('/')
             logger.info(f"Auto-detected webhook URL: {webhook_url}")
         else:
             logger.warning("No TELEGRAM_WEBHOOK_URL set - Telegram will use polling (may conflict)")
