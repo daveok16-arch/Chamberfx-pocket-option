@@ -224,7 +224,7 @@ class PocketOptionClient:
             logger.error(f"[WS] Failed to change symbol: {e}")
     
     async def _message_handler(self) -> None:
-        """Handle incoming WebSocket messages."""
+        """Handle incoming WebSocket messages with proper error handling."""
         pending_binary_event = None
         auth_sent = False
         subscribed = False
@@ -234,86 +234,102 @@ class PocketOptionClient:
                 if not self._running:
                     break
                 
-                # Handle binary messages
-                if isinstance(message, bytes):
-                    msg_str = message.decode('utf-8')
-                elif isinstance(message, str):
-                    msg_str = message
-                else:
-                    continue
-                
-                # Log raw message for debugging
-                if len(msg_str) < 100:
-                    logger.debug(f"[WS] RX: {msg_str}")
-                
-                # Engine.IO heartbeat
-                if msg_str == '2':
-                    continue
-                
-                # Handshake response
-                if msg_str.startswith('0{'):
-                    logger.info("[WS] Received handshake")
-                    await self._ws.send('40')
-                    continue
-                
-                # Namespace acknowledgment
-                if msg_str == '40' or msg_str.startswith('40['):
-                    logger.info("[WS] Namespace connected")
-                    if self._auth_packet and not auth_sent:
-                        logger.info(f"[WS] Sending auth: {self._auth_packet[:50]}...")
-                        await self._ws.send(self._auth_packet)
-                        auth_sent = True
-                    continue
-                
-                # Auth success
-                if 'successauth' in msg_str.lower() or ('true' in msg_str.lower() and len(msg_str) < 50):
-                    logger.info("[WS] Authentication successful")
-                    if not subscribed:
-                        await self.subscribe_assets()
-                        subscribed = True
-                    continue
-                
-                # Binary event indicator (45-["event",{...}])
-                if msg_str.startswith('45-'):
-                    try:
-                        json_part = msg_str[msg_str.index('['):]
-                        data = json.loads(json_part)
-                        if isinstance(data, list) and len(data) > 1:
-                            pending_binary_event = data[0]
-                    except:
+                try:
+                    # Handle binary messages
+                    if isinstance(message, bytes):
+                        msg_str = message.decode('utf-8')
+                    elif isinstance(message, str):
+                        msg_str = message
+                    else:
+                        continue
+                    
+                    # Skip empty or very long messages (potential noise)
+                    if not msg_str or len(msg_str) > 10000:
+                        continue
+                    
+                    # Log raw message for debugging (truncated for safety)
+                    if len(msg_str) < 100:
+                        logger.debug(f"[WS] RX: {msg_str[:80]}")
+                    
+                    # Engine.IO heartbeat
+                    if msg_str == '2':
+                        continue
+                    
+                    # Handshake response
+                    if msg_str.startswith('0{'):
+                        logger.info("[WS] Received handshake")
+                        await self._ws.send('40')
+                        continue
+                    
+                    # Namespace acknowledgment
+                    if msg_str == '40' or msg_str.startswith('40['):
+                        logger.info("[WS] Namespace connected")
+                        if self._auth_packet and not auth_sent:
+                            logger.info(f"[WS] Sending auth: {self._auth_packet[:50]}...")
+                            await self._ws.send(self._auth_packet)
+                            auth_sent = True
+                        continue
+                    
+                    # Auth success
+                    if 'successauth' in msg_str.lower() or ('true' in msg_str.lower() and len(msg_str) < 50):
+                        logger.info("[WS] Authentication successful")
+                        if not subscribed:
+                            await self.subscribe_assets()
+                            subscribed = True
+                        continue
+                    
+                    # Binary event indicator (45-["event",{...}])
+                    if msg_str.startswith('45-'):
+                        try:
+                            json_part = msg_str[msg_str.index('['):]
+                            data = json.loads(json_part)
+                            if isinstance(data, list) and len(data) > 1:
+                                pending_binary_event = data[0]
+                        except (json.JSONDecodeError, ValueError) as e:
+                            logger.warning(f"[WS] Binary event parse error: {e}")
+                            pending_binary_event = None
+                        continue
+                    
+                    # Binary data follows indicator
+                    if pending_binary_event and not msg_str.startswith('42'):
+                        event = pending_binary_event
                         pending_binary_event = None
-                    continue
-                
-                # Binary data follows indicator
-                if pending_binary_event and not msg_str.startswith('42'):
-                    event = pending_binary_event
-                    pending_binary_event = None
+                        
+                        try:
+                            await self._process_event(event, json.loads(msg_str))
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"[WS] Binary data parse error: {e}")
+                        continue
                     
-                    try:
-                        await self._process_event(event, json.loads(msg_str))
-                    except json.JSONDecodeError:
-                        pass
-                    continue
-                
-                # Standard event (42["event",{...}])
-                if msg_str.startswith('42'):
-                    try:
-                        json_part = msg_str[2:]
-                        data = json.loads(json_part)
-                        if isinstance(data, list) and len(data) > 0:
-                            event = data[0]
-                            payload = data[1] if len(data) > 1 else None
-                            await self._process_event(event, payload)
-                    except json.JSONDecodeError:
-                        pass
+                    # Standard event (42["event",{...}])
+                    if msg_str.startswith('42'):
+                        try:
+                            json_part = msg_str[2:]
+                            data = json.loads(json_part)
+                            if isinstance(data, list) and len(data) > 0:
+                                event = data[0]
+                                payload = data[1] if len(data) > 1 else None
+                                await self._process_event(event, payload)
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"[WS] Event parse error: {e}")
+                        continue
+                        
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    # Log but don't crash the message handler
+                    logger.error(f"[WS] Message handling error: {e}", exc_info=False)
                     continue
                     
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("[WS] Connection closed")
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.warning(f"[WS] Connection closed: code={e.code}, reason={e.reason}")
+        except asyncio.CancelledError:
+            logger.info("[WS] Message handler cancelled")
         except Exception as e:
-            logger.error(f"[WS] Handler error: {e}")
+            logger.error(f"[WS] Handler error: {e}", exc_info=True)
         finally:
             self._connected = False
+            logger.info("[WS] Message handler stopped")
     
     async def _process_event(self, event: str, data) -> None:
         """Process a Socket.IO event."""

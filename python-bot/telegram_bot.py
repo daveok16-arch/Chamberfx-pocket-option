@@ -7,7 +7,8 @@ for real-time trading signal delivery.
 
 import asyncio
 import logging
-from typing import Optional, Dict, TYPE_CHECKING
+import re
+from typing import Optional, Dict, Set, TYPE_CHECKING
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -59,6 +60,9 @@ OTC_PAIRS = [
     ("ETHUSD_otc", "ETHUSD/OTC", "Ξ"),
 ]
 
+# Set of valid asset IDs for fast lookup
+VALID_ASSET_IDS: Set[str] = {pair[0] for pair in OTC_PAIRS}
+
 # Payout info for each pair (approximate OTC payouts)
 OTC_PAYOUTS = {
     "EURUSD_otc": 88,
@@ -85,8 +89,17 @@ EXPIRATION_MAP = {
     "exp_30m": ("30m", 1800),
 }
 
+# Set of valid expiration callbacks for fast lookup
+VALID_EXPIRATIONS: Set[str] = set(EXPIRATION_MAP.keys())
+
 # Strategy routing: seconds <= 15 -> TVV
 TURBO_EXPIRATIONS = {"exp_5s", "exp_15s"}
+
+# Maximum callback data length for security
+MAX_CALLBACK_LENGTH = 64
+
+# Pattern for validating asset IDs (alphanumeric + underscore)
+ASSET_ID_PATTERN = re.compile(r'^[A-Z]{3,7}_?otc$', re.IGNORECASE)
 
 
 # ============================================
@@ -270,6 +283,51 @@ Please select another expiry.
 
 
 # ============================================
+# CALLBACK DATA VALIDATOR
+# ============================================
+
+class CallbackDataValidator:
+    """Validates and sanitizes callback data from inline keyboards."""
+    
+    @staticmethod
+    def sanitize_callback_data(data: Optional[str]) -> Optional[str]:
+        """
+        Sanitize callback data to prevent injection attacks.
+        Returns None if data is invalid.
+        """
+        if data is None:
+            return None
+        
+        # Check length
+        if len(data) > MAX_CALLBACK_LENGTH:
+            logger.warning(f"[VALIDATOR] Callback data too long: {len(data)} chars")
+            return None
+        
+        # Only allow safe characters
+        safe_pattern = re.compile(r'^[a-zA-Z0-9_]+$')
+        if not safe_pattern.match(data):
+            logger.warning(f"[VALIDATOR] Invalid characters in callback: {data[:20]}...")
+            return None
+        
+        return data
+    
+    @staticmethod
+    def validate_asset_id(asset_id: str) -> bool:
+        """Validate that an asset ID is in the allowed list."""
+        return asset_id in VALID_ASSET_IDS
+    
+    @staticmethod
+    def validate_expiration(exp_data: str) -> bool:
+        """Validate that an expiration callback is in the allowed list."""
+        return exp_data in VALID_EXPIRATIONS
+    
+    @staticmethod
+    def is_safe_navigation(data: str) -> bool:
+        """Check if navigation command is allowed."""
+        return data in {"nav_asset", "refresh", "back", "main_menu"}
+
+
+# ============================================
 # TELEGRAM TRADING BOT
 # ============================================
 
@@ -277,15 +335,20 @@ class TelegramTradingBot:
     """
     Interactive Telegram bot with OTC Asset Selection Hub.
     Fully integrated with TradingEngine for live signal generation.
+    Thread-safe implementation with input validation.
     """
     
     def __init__(self, token: str, trading_engine: Optional['TradingEngine'] = None):
         self.token = token
         self.trading_engine = trading_engine
         
-        # User contexts
+        # User contexts with thread-safe access
         self._contexts: Dict[int, UserContext] = {}
+        self._context_lock = asyncio.Lock()
+        
+        # Analysis tasks (one per user)
         self._analysis_tasks: Dict[int, asyncio.Task] = {}
+        self._tasks_lock = asyncio.Lock()
         
         # Telegram app
         self._application: Optional[Application] = None
@@ -293,10 +356,49 @@ class TelegramTradingBot:
         
         # Formatter
         self.formatter = SignalFormatter()
+        
+        # Validator
+        self.validator = CallbackDataValidator()
     
     @property
     def connected(self) -> bool:
         return self._connected
+    
+    async def get_context(self, user_id: int) -> UserContext:
+        """
+        Get or create a user context (thread-safe).
+        """
+        async with self._context_lock:
+            if user_id not in self._contexts:
+                self._contexts[user_id] = UserContext(user_id=user_id, chat_id=0)
+            return self._contexts[user_id]
+    
+    async def remove_context(self, user_id: int) -> None:
+        """Remove a user context (thread-safe)."""
+        async with self._context_lock:
+            if user_id in self._contexts:
+                del self._contexts[user_id]
+    
+    async def set_analysis_task(self, user_id: int, task: asyncio.Task) -> None:
+        """Set an analysis task for a user (thread-safe)."""
+        async with self._tasks_lock:
+            self._analysis_tasks[user_id] = task
+    
+    async def get_analysis_task(self, user_id: int) -> Optional[asyncio.Task]:
+        """Get an analysis task for a user (thread-safe)."""
+        async with self._tasks_lock:
+            return self._analysis_tasks.get(user_id)
+    
+    async def cancel_analysis_task(self, user_id: int) -> None:
+        """Cancel and remove an analysis task for a user (thread-safe)."""
+        async with self._tasks_lock:
+            if user_id in self._analysis_tasks:
+                self._analysis_tasks[user_id].cancel()
+                try:
+                    await self._analysis_tasks[user_id]
+                except asyncio.CancelledError:
+                    pass
+                del self._analysis_tasks[user_id]
     
     async def start(self, webhook_url: Optional[str] = None) -> None:
         """Initialize and start the bot with webhook (recommended for production)."""
@@ -348,8 +450,19 @@ class TelegramTradingBot:
     
     async def stop(self) -> None:
         """Stop the bot."""
-        for task in self._analysis_tasks.values():
-            task.cancel()
+        # Cancel all analysis tasks safely
+        async with self._tasks_lock:
+            for user_id, task in list(self._analysis_tasks.items()):
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            self._analysis_tasks.clear()
+        
+        # Clear contexts
+        async with self._context_lock:
+            self._contexts.clear()
         
         if self._application:
             try:
@@ -359,12 +472,6 @@ class TelegramTradingBot:
             await self._application.stop()
         self._connected = False
         logger.info("Telegram bot stopped")
-    
-    def get_context(self, user_id: int) -> UserContext:
-        """Get or create a user context."""
-        if user_id not in self._contexts:
-            self._contexts[user_id] = UserContext(user_id=user_id, chat_id=0)
-        return self._contexts[user_id]
     
     def _get_asset_display(self, asset_id: str) -> str:
         """Get display name with payout for an asset."""
@@ -380,7 +487,7 @@ class TelegramTradingBot:
     
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start - show OTC Asset Selection Hub."""
-        ctx = self.get_context(update.effective_user.id)
+        ctx = await self.get_context(update.effective_user.id)
         ctx.chat_id = update.effective_chat.id
         ctx.state = MenuState.ASSET_SELECTION
         
@@ -419,12 +526,16 @@ class TelegramTradingBot:
         connected = self._connected and self.trading_engine is not None
         po_connected = self.trading_engine.connected if self.trading_engine else False
         
+        # Get safe count of active contexts
+        async with self._context_lock:
+            active_users = len(self._contexts)
+        
         text = f"""
 <b>🤖 CHAMBERFX Status</b>
 
 📡 <b>Telegram:</b> {"🟢 Online" if connected else "🔴 Offline"}
 📊 <b>Pocket Option:</b> {"🟢 Connected" if po_connected else "🔴 Disconnected"}
-👥 <b>Active Users:</b> {len(self._contexts)}
+👥 <b>Active Users:</b> {active_users}
 
 <b>Commands:</b>
 /start - Open OTC Router
@@ -441,20 +552,29 @@ class TelegramTradingBot:
         """
         Handle ALL inline button callbacks.
         Routes based on callback_data prefix.
+        Includes input validation and sanitization.
         """
         query = update.callback_query
         if not query:
             return
         
         user_id = update.effective_user.id
-        ctx = self.get_context(user_id)
+        ctx = await self.get_context(user_id)
         ctx.chat_id = query.message.chat_id
-        data = query.data or ""
+        
+        # Validate and sanitize callback data
+        raw_data = query.data or ""
+        data = self.validator.sanitize_callback_data(raw_data)
+        
+        if data is None:
+            logger.warning(f"[TG] Invalid callback from {user_id}: {raw_data[:30]}...")
+            await query.answer("⚠️ Invalid input", show_alert=True)
+            return
         
         logger.info(f"[TG] Callback from {user_id}: {data}")
         
         try:
-            # Step A: Stop loading spinner immediately
+            # Stop loading spinner immediately
             await query.answer()
             
             # Route based on callback prefix
@@ -473,14 +593,23 @@ class TelegramTradingBot:
             elif data == "back":
                 await self._handle_back(query, ctx)
             
+            elif data == "main_menu":
+                await self._handle_nav_asset(query, ctx)
+            
+            else:
+                logger.warning(f"[TG] Unknown callback data: {data}")
+                await query.answer("⚠️ Unknown command", show_alert=True)
+            
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            logger.error(f"[TG] Callback error: {e}")
+            logger.error(f"[TG] Callback error: {e}", exc_info=True)
             try:
                 await query.message.reply_text(
-                    self.formatter.format_error(str(e)),
+                    self.formatter.format_error("An error occurred. Please try again."),
                     parse_mode='HTML'
                 )
-            except:
+            except Exception:
                 pass
     
     # ============================================
@@ -495,7 +624,7 @@ class TelegramTradingBot:
     ):
         """
         Handle OTC pair selection.
-        1. Extract asset ID
+        1. Extract and validate asset ID
         2. Update WebSocket subscription
         3. Cache in user context
         4. Auto-advance to expiration menu
@@ -503,15 +632,14 @@ class TelegramTradingBot:
         # Step 1: Extract asset
         asset_id = data.replace("setpair_", "")
         
-        # Validate asset
-        valid_assets = [pair[0] for pair in OTC_PAIRS]
-        if asset_id not in valid_assets:
+        # Validate asset using validator
+        if not self.validator.validate_asset_id(asset_id):
             logger.error(f"[TG] Invalid asset: {asset_id}")
+            await query.answer("⚠️ Invalid asset selected", show_alert=True)
             return
         
         # Step 2: Update WebSocket subscription
         if self.trading_engine and self.trading_engine.connected:
-            # Change symbol subscription
             await self._change_symbol(asset_id)
         
         # Step 3: Cache asset in context
@@ -541,14 +669,13 @@ class TelegramTradingBot:
             logger.error(f"[TG] Failed to change symbol: {e}")
     
     async def _handle_nav_asset(self, query: 'CallbackQuery', ctx: UserContext):
-        """Navigate back to asset selection hub."""
-        # Cancel any running analysis
-        if ctx.user_id in self._analysis_tasks:
-            self._analysis_tasks[ctx.user_id].cancel()
-            del self._analysis_tasks[ctx.user_id]
+        """Navigate back to asset selection hub (thread-safe)."""
+        # Cancel any running analysis using thread-safe method
+        await self.cancel_analysis_task(ctx.user_id)
         
         ctx.state = MenuState.ASSET_SELECTION
         ctx.selected_expiration = None
+        ctx.active_asset = None
         
         text, keyboard = self.formatter.format_otc_menu()
         await query.message.edit_message_text(
@@ -568,9 +695,10 @@ class TelegramTradingBot:
         data: str
     ):
         """Handle expiration selection and start analysis."""
-        # Parse expiration
-        if data not in EXPIRATION_MAP:
+        # Validate expiration using validator
+        if not self.validator.validate_expiration(data):
             logger.error(f"[TG] Unknown expiration: {data}")
+            await query.answer("⚠️ Invalid expiration selected", show_alert=True)
             return
         
         expiration_label, expiration_seconds = EXPIRATION_MAP[data]
@@ -590,14 +718,13 @@ class TelegramTradingBot:
             parse_mode='HTML'
         )
         
-        # Cancel existing analysis task
-        if ctx.user_id in self._analysis_tasks:
-            self._analysis_tasks[ctx.user_id].cancel()
+        # Cancel existing analysis task using thread-safe method
+        await self.cancel_analysis_task(ctx.user_id)
         
         # Determine if turbo
         is_turbo = data in TURBO_EXPIRATIONS
         
-        # Start new analysis task
+        # Start new analysis task using thread-safe method
         task = asyncio.create_task(
             self._run_analysis(
                 chat_id=ctx.chat_id,
@@ -608,7 +735,7 @@ class TelegramTradingBot:
                 is_turbo=is_turbo
             )
         )
-        self._analysis_tasks[ctx.user_id] = task
+        await self.set_analysis_task(ctx.user_id, task)
     
     async def _handle_refresh(self, query: 'CallbackQuery', ctx: UserContext):
         """Handle refresh - restart with same settings."""
@@ -625,11 +752,10 @@ class TelegramTradingBot:
             await self._handle_nav_asset(query, ctx)
     
     async def _handle_back(self, query: 'CallbackQuery', ctx: UserContext):
-        """Handle back button - return to expiration or asset menu."""
+        """Handle back button - return to expiration or asset menu (thread-safe)."""
         if ctx.active_asset and ctx.state == MenuState.ANALYZING:
-            if ctx.user_id in self._analysis_tasks:
-                self._analysis_tasks[ctx.user_id].cancel()
-                del self._analysis_tasks[ctx.user_id]
+            # Cancel any running analysis using thread-safe method
+            await self.cancel_analysis_task(ctx.user_id)
             
             ctx.state = MenuState.EXPIRATION_SELECTION
             asset_display = self._get_asset_display(ctx.active_asset)
@@ -671,8 +797,9 @@ class TelegramTradingBot:
         
         try:
             while asyncio.get_event_loop().time() < deadline:
-                # Check if cancelled
-                if user_id not in self._analysis_tasks:
+                # Check if cancelled using thread-safe method
+                task = await self.get_analysis_task(user_id)
+                if task is None or task.done():
                     logger.info(f"[ANALYSIS] Cancelled for {user_id}")
                     return
                 
@@ -693,11 +820,11 @@ class TelegramTradingBot:
         except asyncio.CancelledError:
             logger.info(f"[ANALYSIS] Cancelled: {user_id}")
         except Exception as e:
-            logger.error(f"[ANALYSIS] Error: {e}")
+            logger.error(f"[ANALYSIS] Error: {e}", exc_info=True)
             await self._send_error(chat_id, str(e))
         finally:
-            if user_id in self._analysis_tasks:
-                del self._analysis_tasks[user_id]
+            # Clean up task using thread-safe method
+            await self.cancel_analysis_task(user_id)
     
     async def _check_conditions(self, asset_id: str, is_turbo: bool) -> Optional[Dict]:
         """Check trading conditions for specific asset."""

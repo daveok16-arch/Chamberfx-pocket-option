@@ -1,5 +1,11 @@
 """
 Quick test for Telegram inline keyboard
+
+NOTE: Callback data format must match telegram_bot.py EXACTLY:
+- exp_5s, exp_15s (Turbo)
+- exp_1m, exp_2m, exp_3m (Short term)
+- exp_5m, exp_15m, exp_30m (Medium term)
+- nav_asset, back, main_menu (Navigation)
 """
 
 import os
@@ -20,27 +26,31 @@ if not TELEGRAM_CHAT_ID:
 
 
 def build_keyboard():
+    """
+    Build inline keyboard with standardized callback data.
+    Format matches telegram_bot.py EXACTLY.
+    """
     keyboard = [
         # Row 1: Turbo options
         [
-            InlineKeyboardButton("⚡ 5s", callback_data="exp_S5"),
-            InlineKeyboardButton("⚡ 15s", callback_data="exp_S15"),
+            InlineKeyboardButton("⚡ 5s", callback_data="exp_5s"),
+            InlineKeyboardButton("⚡ 15s", callback_data="exp_15s"),
         ],
         # Row 2: Short term
         [
-            InlineKeyboardButton("1️⃣ 1m", callback_data="exp_M1"),
-            InlineKeyboardButton("2️⃣ 2m", callback_data="exp_M2"),
-            InlineKeyboardButton("3️⃣ 3m", callback_data="exp_M3"),
+            InlineKeyboardButton("1️⃣ 1m", callback_data="exp_1m"),
+            InlineKeyboardButton("2️⃣ 2m", callback_data="exp_2m"),
+            InlineKeyboardButton("3️⃣ 3m", callback_data="exp_3m"),
         ],
         # Row 3: Medium term
         [
-            InlineKeyboardButton("5️⃣ 5m", callback_data="exp_M5"),
-            InlineKeyboardButton("1️⃣5️⃣ 15m", callback_data="exp_M15"),
-            InlineKeyboardButton("3️⃣0️⃣ 30m", callback_data="exp_M30"),
+            InlineKeyboardButton("5️⃣ 5m", callback_data="exp_5m"),
+            InlineKeyboardButton("1️⃣5️⃣ 15m", callback_data="exp_15m"),
+            InlineKeyboardButton("3️⃣0️⃣ 30m", callback_data="exp_30m"),
         ],
         # Row 4: Navigation
         [
-            InlineKeyboardButton("⬅️ Back", callback_data="back"),
+            InlineKeyboardButton("⬅️ Back to Pairs", callback_data="nav_asset"),
             InlineKeyboardButton("📱 Main Menu", callback_data="main_menu"),
         ],
     ]
