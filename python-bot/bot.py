@@ -58,15 +58,16 @@ async def telegram_webhook_handler(request):
                 return web.Response(text="Bot not ready", status=503)
         
         # Bot is ready, process the update
+        logger.info(f"[WEBHOOK] Bot ready={_telegram_bot.ready}, connected={_telegram_bot._connected}, app={_telegram_bot._application is not None}")
         logger.info(f"[WEBHOOK] Feeding update to bot queue...")
         await _telegram_bot._application.update_queue.put(data)
-        logger.info(f"[WEBHOOK] Update queued successfully")
+        logger.info(f"[WEBHOOK] Update queued successfully, queue_size={_telegram_bot._application.update_queue.qsize()}")
         
         # Return update_id as per Telegram's webhook API requirements
         update_id = data.get('update_id', 0)
         return web.Response(text=str(update_id), status=200)
     except Exception as e:
-        logger.error(f"[WEBHOOK] Telegram webhook error: {e}")
+        logger.error(f"[WEBHOOK] Telegram webhook error: {e}", exc_info=True)
         return web.Response(text="Error", status=500)
 
 

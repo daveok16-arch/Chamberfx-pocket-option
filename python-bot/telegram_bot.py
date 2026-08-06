@@ -514,8 +514,12 @@ class TelegramTradingBot:
         # Start the update processing task and STORE the reference
         self._update_processor_task = asyncio.create_task(self._process_updates())
         
-        # Wait for the task to actually start processing
-        # This prevents the race condition where webhooks arrive before the queue consumer is ready
+        # YIELD CONTROL to the event loop FIRST
+        # This allows _process_updates() to actually start running
+        # Without this, the task is scheduled but can't execute until we yield
+        await asyncio.sleep(0)
+        
+        # Now wait for the task to signal it's waiting for updates
         await self._update_started.wait()
         
         self._ready = True  # Mark bot as ready to process updates
@@ -538,16 +542,19 @@ class TelegramTradingBot:
         self._update_started.set()
         
         try:
+            logger.info(f"[TG] Waiting for updates... (connected={self._connected}, app={self._application is not None})")
+            
             # In python-telegram-bot v20.x, updates are put in the queue as dicts
             # This task consumes them, converts to Update objects, and processes
             while self._connected and self._application:
                 try:
                     # Get updates from the queue with timeout
+                    logger.info("[TG] About to get from queue...")
                     data = await asyncio.wait_for(
                         self._application.update_queue.get(),
-                        timeout=1.0
+                        timeout=5.0
                     )
-                    logger.info(f"[TG] Received update data: {type(data).__name__}")
+                    logger.info(f"[TG] Received update from queue: {type(data).__name__}, keys={list(data.keys()) if isinstance(data, dict) else 'N/A'}")
                     
                     # Convert dict to Update object if needed
                     if isinstance(data, dict):
