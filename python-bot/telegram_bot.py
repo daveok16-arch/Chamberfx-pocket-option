@@ -505,6 +505,9 @@ class TelegramTradingBot:
             # Use polling mode
             logger.info("Telegram bot using polling mode")
         
+        # Set _connected BEFORE starting the task to ensure the while loop condition is true
+        self._connected = True
+        
         # Reset the update started event
         self._update_started.clear()
         
@@ -515,7 +518,6 @@ class TelegramTradingBot:
         # This prevents the race condition where webhooks arrive before the queue consumer is ready
         await self._update_started.wait()
         
-        self._connected = True
         self._ready = True  # Mark bot as ready to process updates
         logger.info("Telegram bot started successfully")
         
