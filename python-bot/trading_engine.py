@@ -120,6 +120,11 @@ class TradingEngine:
         """Check if Pocket Option is connected."""
         return self.po_client and self.po_client.connected
     
+    @property
+    def authenticated(self) -> bool:
+        """Check if Pocket Option is authenticated."""
+        return self.po_client and self.po_client.authenticated
+    
     def set_signal_callback(
         self, 
         callback: Callable[[TradingSignal], Awaitable[None]]
@@ -135,15 +140,23 @@ class TradingEngine:
         
         self._running = True
         
+        # Set up callbacks FIRST
+        self.po_client.set_tick_callback(self._on_tick)
+        self.po_client.set_bar_callback(self._on_bar_complete)
+        self.po_client.set_tvv_callback(self._on_tvv)
+        
+        # Discover Pocket Option session (Playwright)
+        logger.info("[ENGINE] Discovering Pocket Option session...")
+        if not await self.po_client.discover_session():
+            logger.error("[ENGINE] Failed to discover Pocket Option session")
+        
         # Connect to Pocket Option
         logger.info("[ENGINE] Connecting to Pocket Option...")
         if not await self.po_client.connect():
             logger.error("[ENGINE] Failed to connect to Pocket Option")
         
-        # Set up callbacks
-        self.po_client.set_tick_callback(self._on_tick)
-        self.po_client.set_bar_callback(self._on_bar_complete)
-        self.po_client.set_tvv_callback(self._on_tvv)
+        # Wait a moment for connection to establish
+        await asyncio.sleep(3)
         
         # Start Telegram bot (use webhook if URL provided)
         logger.info("[ENGINE] Starting Telegram bot...")
@@ -225,10 +238,18 @@ class TradingEngine:
     
     def _on_tick(self, update: PriceUpdate) -> None:
         """Handle raw tick update."""
-        logger.debug(
-            f"[TICK] {update.asset_id}: {update.price:.5f} "
-            f"({update.direction})"
-        )
+        # Log first few ticks for debugging
+        if not hasattr(self, '_tick_count'):
+            self._tick_count = 0
+        self._tick_count += 1
+        
+        if self._tick_count <= 5:
+            logger.info(
+                f"[TICK] ✅ {update.asset_id}: {update.price:.5f} "
+                f"({update.direction})"
+            )
+        elif self._tick_count == 6:
+            logger.info("[TICK] ... (suppressing tick logs)")
     
     def _on_bar_complete(self, asset_id: str, bar: TickVolumeBar) -> None:
         """Handle completed tick-volume bar - calculate indicators."""

@@ -41,6 +41,7 @@ async def telegram_webhook_handler(request):
     global _telegram_bot
     try:
         data = await request.json()
+        logger.info(f"[WEBHOOK] Received update: {data.get('message', {}).get('text', data.get('callback_query', {}).get('data', 'unknown')}")
         
         # Wait for bot to be ready (with timeout)
         max_wait = 30  # seconds
@@ -49,14 +50,16 @@ async def telegram_webhook_handler(request):
             await asyncio.sleep(0.1)
             waited += 0.1
             if waited > max_wait:
-                logger.warning("Telegram bot not ready after waiting")
+                logger.warning("[WEBHOOK] Telegram bot not ready after waiting")
                 return web.Response(text="Bot not ready", status=503)
         
         # Bot is ready, process the update
+        logger.info(f"[WEBHOOK] Feeding update to bot queue...")
         await _telegram_bot._application.update_queue.put(data)
+        logger.info(f"[WEBHOOK] Update queued successfully")
         return web.Response(text="OK", status=200)
     except Exception as e:
-        logger.error(f"Telegram webhook error: {e}")
+        logger.error(f"[WEBHOOK] Telegram webhook error: {e}")
         return web.Response(text="Error", status=500)
 
 
