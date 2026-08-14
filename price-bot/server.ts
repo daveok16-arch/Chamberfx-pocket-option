@@ -70,6 +70,8 @@ export interface PriceCaptureConfig {
   reconnectDelay: number;
   /** Max reconnection attempts */
   maxReconnectAttempts: number;
+  /** Candle period in seconds (default 60 = 1-minute candles) */
+  candlePeriod: number;
 }
 
 // ============================================
@@ -92,7 +94,8 @@ const DEFAULT_CONFIG: PriceCaptureConfig = {
   outputFile: "./prices.json",
   verbose: true,
   reconnectDelay: 3000,
-  maxReconnectAttempts: 10
+  maxReconnectAttempts: 10,
+  candlePeriod: 60
 };
 
 const POCKET_OPTION_URLS = [
@@ -128,12 +131,12 @@ export class PocketOptionPriceBot {
   // Price history (for export)
   private priceHistory: Map<string, Tick[]> = new Map();
   
-  // Callbacks
-  private onTickCallback?: (tick: Tick) => void;
-  private onCandleCallback?: (candle: Candle) => void;
-  private onConnectCallback?: () => void;
-  private onDisconnectCallback?: () => void;
-  private onErrorCallback?: (error: Error) => void;
+  // Callbacks (multiple listeners supported)
+  private tickListeners: ((tick: Tick) => void)[] = [];
+  private candleListeners: ((candle: Candle) => void)[] = [];
+  private connectListeners: (() => void)[] = [];
+  private disconnectListeners: (() => void)[] = [];
+  private errorListeners: ((error: Error) => void)[] = [];
 
   constructor(config: Partial<PriceCaptureConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -302,7 +305,7 @@ export class PocketOptionPriceBot {
     this.log("[WS] Connection opened");
     this.connected = true;
     this.reconnectAttempts = 0;
-    this.onConnectCallback?.();
+    this.connectListeners.forEach(cb => cb());
   }
 
   private handleMessage(msg: string): void {
@@ -487,7 +490,7 @@ export class PocketOptionPriceBot {
       this.priceHistory.set(assetId, history);
 
       // Callbacks
-      this.onTickCallback?.(tick);
+      this.tickListeners.forEach(cb => cb(tick));
 
       if (this.config.verbose) {
         this.log(`[TICK] ${assetId}: ${price.toFixed(5)} (${direction})`);
@@ -526,7 +529,7 @@ export class PocketOptionPriceBot {
     let candle = asset.candles.find(c => c.openTime === candleTime);
     
     if (!candle) {
-      candle = {
+      const newCandle: Candle = {
         assetId: asset.id,
         open: price,
         high: price,
@@ -536,11 +539,11 @@ export class PocketOptionPriceBot {
         openTime: candleTime,
         closeTime: candleTime + minuteMs - 1
       };
-      asset.candles.push(candle);
+      asset.candles.push(newCandle);
       if (asset.candles.length > 100) asset.candles.shift();
       
       // Emit new candle
-      this.onCandleCallback?.(candle);
+      this.candleListeners.forEach(cb => cb(newCandle));
     } else {
       candle.high = Math.max(candle.high, price);
       candle.low = Math.min(candle.low, price);
@@ -571,16 +574,59 @@ export class PocketOptionPriceBot {
     }
   }
 
+  private processHistoryData(data: any): void {
+    // Pocket Option history event: [assetId, [[time, open, high, low, close, volume], ...]]
+    if (!Array.isArray(data) || data.length < 2) return;
+
+    const rawId = String(data[0]);
+    const assetId = this.normalizeAssetId(rawId);
+    const candles = data[1];
+
+    if (!Array.isArray(candles)) return;
+
+    const asset = this.assets.get(assetId);
+    if (!asset) return;
+
+    for (const c of candles) {
+      if (!Array.isArray(c) || c.length < 5) continue;
+      const time = Number(c[0]) * 1000;
+      const period = this.config.candlePeriod ? this.config.candlePeriod * 1000 : 60000;
+      const candle: Candle = {
+        assetId: assetId,
+        open: Number(c[1]),
+        high: Number(c[2]),
+        low: Number(c[3]),
+        close: Number(c[4]),
+        volume: Number(c[5]) || 0,
+        openTime: time,
+        closeTime: time + period - 1
+      };
+      asset.candles.push(candle);
+    }
+
+    // Trim to last 100 candles
+    if (asset.candles.length > 100) {
+      asset.candles = asset.candles.slice(-100);
+    }
+
+    // Seed lastPrice from the most recent historical close
+    if (asset.candles.length > 0) {
+      asset.lastPrice = asset.candles[asset.candles.length - 1].close;
+    }
+
+    this.log(`[HISTORY] ${assetId}: loaded ${candles.length} candles (last close: ${asset.lastPrice.toFixed(5)})`);
+  }
+
   private handleError(err: Error): void {
     this.log(`[WS ERROR] ${err.message}`);
-    this.onErrorCallback?.(err);
+    this.errorListeners.forEach(cb => cb(err));
   }
 
   private handleClose(code: number, reason: string): void {
     this.log(`[WS] Connection closed (${code}): ${reason}`);
     this.connected = false;
     this.isAuthenticated = false;
-    this.onDisconnectCallback?.();
+    this.disconnectListeners.forEach(cb => cb());
     this.scheduleReconnect();
   }
 
@@ -673,23 +719,23 @@ export class PocketOptionPriceBot {
   }
 
   public onTick(callback: (tick: Tick) => void): void {
-    this.onTickCallback = callback;
+    this.tickListeners.push(callback);
   }
 
   public onCandle(callback: (candle: Candle) => void): void {
-    this.onCandleCallback = callback;
+    this.candleListeners.push(callback);
   }
 
   public onConnect(callback: () => void): void {
-    this.onConnectCallback = callback;
+    this.connectListeners.push(callback);
   }
 
   public onDisconnect(callback: () => void): void {
-    this.onDisconnectCallback = callback;
+    this.disconnectListeners.push(callback);
   }
 
   public onError(callback: (error: Error) => void): void {
-    this.onErrorCallback = callback;
+    this.errorListeners.push(callback);
   }
 
   public savePricesToFile(): void {
@@ -778,5 +824,8 @@ async function main() {
   });
 }
 
-// Run if this is the main module
-main().catch(console.error);
+// Run only when executed directly (not when imported as a module)
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.url.replace('file://', '').replace('.ts', '.js')) ||
+    (process.argv[1] && process.argv[1].endsWith('server.ts'))) {
+  main().catch(console.error);
+}
