@@ -45,17 +45,27 @@ export class TelegramNotifier {
     if (!this.enabled) return false;
     // 1) Token check
     let meOk = false;
+    let botId = '';
     try {
       const res = await fetch(`${API_URL}/getMe`);
-      const data = await res.json() as { ok: boolean; description?: string; result?: { username?: string } };
+      const data = await res.json() as { ok: boolean; description?: string; result?: { id?: number; username?: string } };
       if (data.ok && data.result) {
         meOk = true;
-        console.log(`[TELEGRAM] Bot token OK — @${data.result.username}`);
+        botId = String(data.result.id ?? '');
+        console.log(`[TELEGRAM] Bot token OK — @${data.result.username} (id ${botId})`);
       } else {
         console.error(`[TELEGRAM] Bot token INVALID: ${data.description}`);
+        return false;
       }
     } catch (err) {
       console.error(`[TELEGRAM] getMe network error: ${(err as Error).message}`);
+      return false;
+    }
+    // Common mistake: using the bot's own id as the chat id.
+    if (botId && this.chatId === botId) {
+      console.error(`[TELEGRAM] TELEGRAM_CHAT_ID (${this.chatId}) is the BOT's own id — a bot cannot message itself.`);
+      console.error('[TELEGRAM] Fix: set TELEGRAM_CHAT_ID to YOUR personal Telegram user id (from @userinfobot), after sending /start to your bot.');
+      return false;
     }
     // 2) Chat check
     let chatOk = false;
@@ -68,7 +78,13 @@ export class TelegramNotifier {
         console.log(`[TELEGRAM] Chat OK — type=${data.result.type} ${name ? `(${name})` : ''} id=${this.chatId}`);
       } else {
         console.error(`[TELEGRAM] Chat NOT accessible: ${data.description}`);
-        console.error('[TELEGRAM] Fix: for a private chat, /start the bot first and use your numeric user id (from @userinfobot); for a channel, add the bot as admin and use the id with the -100 prefix (e.g. -1001234567890).');
+        if (data.description && data.description.toLowerCase().includes('chat not found')) {
+          console.error('[TELEGRAM] Fix: for a private chat, send /start to your bot first, then use your numeric user id (from @userinfobot). For a channel, add the bot as admin and use the id with the -100 prefix (e.g. -1001234567890).');
+        } else if (data.description && data.description.toLowerCase().includes("can't send messages to the bot")) {
+          console.error('[TELEGRAM] Fix: TELEGRAM_CHAT_ID points at a bot. Use YOUR personal user id (from @userinfobot) instead.');
+        } else {
+          console.error('[TELEGRAM] Fix: confirm TELEGRAM_CHAT_ID is correct and that the bot can write to that chat.');
+        }
       }
     } catch (err) {
       console.error(`[TELEGRAM] getChat network error: ${(err as Error).message}`);
