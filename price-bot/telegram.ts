@@ -24,7 +24,7 @@ export class TelegramNotifier {
 
   constructor() {
     this.enabled = Boolean(BOT_TOKEN && CHAT_ID);
-    this.chatId = CHAT_ID;
+    this.chatId = CHAT_ID.trim();
     if (!this.enabled) {
       console.warn(
         '[TELEGRAM] Disabled — set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID to deliver signals to Telegram.'
@@ -36,23 +36,73 @@ export class TelegramNotifier {
     return this.enabled;
   }
 
-  /** Send arbitrary text (HTML parse mode). Returns true on success. */
+  /**
+   * Validate the bot token + chat id at startup.
+   * Calls getMe (token check) and getChat (chat check). Logs a precise,
+   * actionable error if either fails. Never throws — the bot keeps running.
+   */
+  async validate(): Promise<boolean> {
+    if (!this.enabled) return false;
+    // 1) Token check
+    let meOk = false;
+    try {
+      const res = await fetch(`${API_URL}/getMe`);
+      const data = await res.json() as { ok: boolean; description?: string; result?: { username?: string } };
+      if (data.ok && data.result) {
+        meOk = true;
+        console.log(`[TELEGRAM] Bot token OK — @${data.result.username}`);
+      } else {
+        console.error(`[TELEGRAM] Bot token INVALID: ${data.description}`);
+      }
+    } catch (err) {
+      console.error(`[TELEGRAM] getMe network error: ${(err as Error).message}`);
+    }
+    // 2) Chat check
+    let chatOk = false;
+    try {
+      const res = await fetch(`${API_URL}/getChat?chat_id=${encodeURIComponent(this.chatId)}`);
+      const data = await res.json() as { ok: boolean; description?: string; result?: { type?: string; title?: string; username?: string; first_name?: string } };
+      if (data.ok && data.result) {
+        chatOk = true;
+        const name = data.result.title || data.result.username || data.result.first_name || '';
+        console.log(`[TELEGRAM] Chat OK — type=${data.result.type} ${name ? `(${name})` : ''} id=${this.chatId}`);
+      } else {
+        console.error(`[TELEGRAM] Chat NOT accessible: ${data.description}`);
+        console.error('[TELEGRAM] Fix: for a private chat, /start the bot first and use your numeric user id (from @userinfobot); for a channel, add the bot as admin and use the id with the -100 prefix (e.g. -1001234567890).');
+      }
+    } catch (err) {
+      console.error(`[TELEGRAM] getChat network error: ${(err as Error).message}`);
+    }
+    return meOk && chatOk;
+  }
+
+  /** Send arbitrary text (HTML parse mode, falls back to plain text on parse error). */
   async send(text: string, parseMode: 'HTML' | 'Markdown' = 'HTML'): Promise<boolean> {
     if (!this.enabled) return false;
+    const ok = await this._sendOnce(text, parseMode);
+    if (!ok && parseMode === 'HTML') {
+      // Retry as plain text in case the HTML entities failed to parse.
+      return this._sendOnce(text.replace(/<[^>]+>/g, ''), undefined);
+    }
+    return ok;
+  }
+
+  private async _sendOnce(text: string, parseMode: 'HTML' | 'Markdown' | undefined): Promise<boolean> {
     try {
+      const body: Record<string, unknown> = {
+        chat_id: this.chatId,
+        text,
+        disable_web_page_preview: true,
+      };
+      if (parseMode) body.parse_mode = parseMode;
       const res = await fetch(`${API_URL}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: this.chatId,
-          text,
-          parse_mode: parseMode,
-          disable_web_page_preview: true,
-        }),
+        body: JSON.stringify(body),
       });
       const data = await res.json() as { ok: boolean; description?: string };
       if (!data.ok) {
-        console.error('[TELEGRAM] sendMessage failed:', data.description);
+        console.error(`[TELEGRAM] sendMessage failed (chat_id=${this.chatId}): ${data.description}`);
       }
       return data.ok === true;
     } catch (err) {

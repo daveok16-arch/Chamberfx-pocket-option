@@ -118,6 +118,8 @@ async function main() {
     console.log('✅ Connected to Pocket Option — live signal generation active\n');
     // Confirm to Telegram that the bot is live (only if enabled)
     void telegram.sendStartup();
+    // Validate Telegram config (token + chat id) — logs precise errors, never throws
+    void telegram.validate();
   });
   bot.onDisconnect(() => {
     console.log('⚠️ Disconnected — will attempt reconnect\n');
