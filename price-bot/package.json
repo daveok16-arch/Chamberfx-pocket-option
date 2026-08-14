@@ -9,8 +9,8 @@
     "trading": "tsx trading-bot.ts",
     "signal": "tsx signal-bot.ts",
     "telegram": "tsx telegram-bot.ts",
-    "start": "tsx signal-bot.ts --expiry 1 --confidence 50",
-    "render:start": "tsx signal-bot.ts --expiry 1 --confidence 50",
+    "start": "tsx signal-bot.ts --expiry 1 --confidence 72",
+    "render:start": "tsx signal-bot.ts --expiry 1 --confidence 72",
     "build": "tsc",
     "postinstall": "playwright install chromium --with-deps"
   },

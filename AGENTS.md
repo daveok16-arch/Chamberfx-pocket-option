@@ -123,3 +123,52 @@ CLOCK-SKEW GOTCHA (still applies): candle `openTime`/`closeTime` come from Pocke
 Option's server clock (embedded in tick timestamps), ~2h ahead of container
 `Date.now()`. Prediction targets + resolution must use the candle array's openTime,
 NOT Date.now(), or candle matches silently fail (0 resolutions).
+
+## Signal Engine v3 -- Quality Over Quantity (2026-08-14)
+User feedback: v2 generated too many low-accuracy signals ("not productive for
+real-account trading"). Researched how professional binary-options signal bots +
+Pocket Option OTC strategies operate. The consistent lessons (from axiory, Investopedia,
+ThinkCapital, tradeciety, quantifiedstrategies, pocketoption.com, binaryoptions.net):
+
+1. **Multi-timeframe (MTF) trend alignment is the #1 false-signal filter.** Trade
+   only in the direction of the higher-timeframe trend. Counter-trend setups on
+   low timeframes are the dominant source of false signals. (Investopedia: "the
+   longer the timeframe, the more reliable the signals"; axiory: "trade only in
+   the direction of the higher-timeframe trend".)
+2. **Volatility/range filter.** Low-range candles are random walk -> no edge.
+   Suppress signals when the current candle range < ~60% of the recent average.
+3. **Stronger confluence.** Require 3+ agreeing components (not 2), and bias
+   toward the never-flipped reversal anchor (rejection wicks + engulfing), which
+   was the most predictive part in v2. Discount the MEAN_REVERT continuation-flip
+   (it underperformed at ~40% live).
+4. **Far fewer signals.** Pros send 1-2/day, not 6/min. Best-of-per-window cap +
+   3-min cooldown + eval every 15s (not 5s).
+5. **Higher confidence bar** (72 default, was 50/68).
+
+### v3 implementation (signal.ts)
+- `computeHtfTrend()` -- aggregates `htfPeriod` (default 5) base candles into a
+  higher timeframe, reads the trend from recent HTF closes (UP/DOWN/FLAT). New
+  config `htfPeriod`, `minHtfCandles`, `requireTrendAlignment`.
+- `rangeVsAverage()` -- current candle range / recent avg range. New config
+  `minRangeRatio` (default 0.6). Suppresses low-volatility candles.
+- `directionFromConfluence(fused, agreeing, minAgreeing)` -- now requires
+  >= `minAgreeing` (default 3) agreeing components for a CALL/PUT.
+- Confidence adjustments: +8 HTF-aligned / -25 misaligned; +6 when the reversal
+  anchor drives the direction; -8 in MEAN_REVERT regime (discount the weak flip).
+- `maxSignalsPerWindow` (default 1) -- best-of per candle window; tracked via
+  `windowEmissions` map keyed by `Math.floor(now / (expiry*60s))`.
+- `minConfidence` raised to 72; `minCandles` 3->5; `cooldownMs` 60s->180s.
+- New `SignalComponents` fields: `htfTrend`, `htfAligned`, `rangeRatio`, `agreeing`.
+- `signal-bot.ts`: periodic eval 5s->15s; default confidence 68->72.
+- Dockerfile/render.yaml/package.json: default `--confidence 72`.
+
+### v3 expected effect
+Fewer, higher-conviction signals. A signal now fires only when: 3+ leading
+components agree AND the direction aligns with the HTF trend AND the candle has
+real volatility AND confidence >=72 AND it's the best setup of that window AND
+3+ min since the last signal on that asset. This directly implements
+"quality over quantity" per the research.
+
+VALIDATION: re-run `accuracy-test.ts --expiry 1 --minutes 30` against the live
+feed to measure v3 win rate. Compare to v2 (51.4% all / 64.7% at >=50). Expect
+fewer decided trades but a higher hit rate, especially on trend-aligned setups.

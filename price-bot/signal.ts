@@ -71,6 +71,10 @@ export interface SignalComponents {
   structureLabel: string;      // 'UPTREND' | 'DOWNTREND' | 'RANGE'
   regime: string;              // 'MEAN_REVERT' | 'TREND' | 'UNCLEAR'
   regimeStrength: number;      // 0..1 — |autocorrelation|, how strong the regime is
+  htfTrend: string;            // v3: 'UP' | 'DOWN' | 'FLAT' (higher-timeframe trend)
+  htfAligned: boolean;         // v3: is the signal aligned with the HTF trend?
+  rangeRatio: number;          // v3: current candle range / recent avg range
+  agreeing: number;            // v3: count of agreeing components
 }
 
 export interface SignalEngineConfig {
@@ -98,21 +102,40 @@ export interface SignalEngineConfig {
   wStructure: number;
   /** Min |autocorrelation| to commit to a regime (below = UNCLEAR, signals dampened) */
   minRegimeStrength: number;
+  /** v3: higher-timeframe aggregation period (multiple of expiryMinutes) */
+  htfPeriod: number;
+  /** v3: min HTF candles required before applying trend-alignment filter */
+  minHtfCandles: number;
+  /** v3: only emit signals aligned with the higher-timeframe trend */
+  requireTrendAlignment: boolean;
+  /** v3: skip candles whose range is below this fraction of the recent average range */
+  minRangeRatio: number;
+  /** v3: best-of cap — emit at most this many signals per evaluation window */
+  maxSignalsPerWindow: number;
+  /** v3: minimum number of agreeing components required for a directional call */
+  minAgreeing: number;
 }
 
 export const DEFAULT_CONFIG: SignalEngineConfig = {
   expiryMinutes: 1,
-  minConfidence: 68,
+  minConfidence: 72,
   tickWindow: 60,
   minTicks: 15,
-  minCandles: 3,
+  minCandles: 5,
   signalWindowSec: 15,
-  cooldownMs: 60_000,
-  wOfi: 35,
-  wCandle: 30,
-  wMomentum: 20,
-  wStructure: 15,
+  cooldownMs: 180_000,
+  wOfi: 30,
+  wCandle: 35,
+  wMomentum: 15,
+  wStructure: 20,
   minRegimeStrength: 0.10,
+  // v3 quality filters (see AGENTS.md "Signal Engine v3")
+  htfPeriod: 5,          // aggregate 5x of expiry-min candles into a HTF trend
+  minHtfCandles: 3,       // need >=3 HTF candles to trust the trend filter
+  requireTrendAlignment: true,   // only emit signals aligned with HTF trend
+  minRangeRatio: 0.6,     // skip candles with range < 60% of recent avg (no edge)
+  maxSignalsPerWindow: 1, // best-of per candle window (quality over quantity)
+  minAgreeing: 3,         // require 3+ agreeing components for a directional call
 };
 
 // ============================================
@@ -138,6 +161,8 @@ export class SignalEngine {
   private config: SignalEngineConfig;
   private states = new Map<string, AssetState>();
   private lastEmitted = new Map<string, Signal>();
+  /** v3: per-window signal emission counter (best-of cap) keyed by candle window */
+  private windowEmissions = new Map<number, number>();
 
   /** Callback fired when a new (non-WAIT) signal is produced. */
   private onSignalCb?: (signal: Signal) => void;
@@ -193,6 +218,7 @@ export class SignalEngine {
       ofi: 0, ofiPressure: 0, candleSignal: 0, candlePattern: 'INSUFFICIENT_DATA',
       momentum: 0, momentumDecay: 0, structure: 0, structureLabel: 'UNKNOWN',
       regime: 'UNCLEAR', regimeStrength: 0,
+      htfTrend: 'FLAT', htfAligned: false, rangeRatio: 0, agreeing: 0,
     };
 
     const timeRemainingSec = this.timeRemainingInCandle(now, cfg.expiryMinutes);
@@ -247,6 +273,16 @@ export class SignalEngine {
     const momentumScore = Math.round(momentum.score * flip * dampen);
     const structureScore = Math.round(structure.score * flip * dampen);
 
+    // --- v3: higher-timeframe trend filter (the #1 false-signal filter) ---
+    const htf = this.computeHtfTrend(candles);
+    const htfAligned =
+      htf === 'FLAT' ? true :              // no clear HTF trend → don't filter
+        (htf === 'UP' && ofiScore + candleScore + momentumScore + structureScore > 0) ||
+        (htf === 'DOWN' && ofiScore + candleScore + momentumScore + structureScore < 0);
+
+    // --- v3: volatility / range filter (low-range candles = random walk, no edge) ---
+    const rangeRatio = this.rangeVsAverage(candles);
+
     const components: SignalComponents = {
       ofi: ofiScore,
       ofiPressure: ofi.pressure,
@@ -258,6 +294,10 @@ export class SignalEngine {
       structureLabel: structure.label,
       regime: regime.label,
       regimeStrength: regime.strength,
+      htfTrend: htf,
+      htfAligned,
+      rangeRatio,
+      agreeing: 0,
     };
 
     // --- Confluence scoring (weighted fusion) ---
@@ -269,10 +309,11 @@ export class SignalEngine {
     const totalWeight = cfg.wOfi + cfg.wCandle + cfg.wMomentum + cfg.wStructure;
     const fused = totalWeight > 0 ? raw / totalWeight : 0; // -100..+100
 
-    // Direction requires agreement: the sign of the fused score, but only
-    // if the majority of components agree in sign (true confluence).
+    // Direction requires STRONG agreement: v3 needs >= minAgreeing (default 3)
+    // components agreeing in sign — true confluence, not a single noisy driver.
     const agreeing = this.countAgreement(ofiScore, candleScore, momentumScore, structureScore);
-    const direction = this.directionFromConfluence(fused, agreeing);
+    components.agreeing = agreeing;
+    const direction = this.directionFromConfluence(fused, agreeing, cfg.minAgreeing);
 
     // Confidence scales the magnitude of agreement, boosted by confluence
     // count and regime strength (a strong regime = higher-conviction signal),
@@ -281,6 +322,14 @@ export class SignalEngine {
     confidence += agreeing * 4; // reward multi-factor agreement
     confidence += Math.round(regime.strength * 20); // strong regime bonus
     confidence -= Math.round(momentum.decay * 15); // exhaustion penalty
+    // v3: reward HTF alignment, penalize misalignment strongly
+    if (htf !== 'FLAT') confidence += htfAligned ? 8 : -25;
+    // v3: the never-flipped reversal anchor (rejection wicks + engulfing) is the
+    // most predictive part; reward signals where it drives the direction.
+    const reversalSign = Math.sign(candle.reversal);
+    if (reversalSign !== 0 && reversalSign === Math.sign(fused)) confidence += 6;
+    // v3: the MEAN_REVERT continuation-flip underperforms live (~40%); discount it
+    if (regime.label === 'MEAN_REVERT') confidence -= 8;
     if (direction === 'WAIT') {
       confidence = Math.min(confidence, 49);
     }
@@ -301,7 +350,7 @@ export class SignalEngine {
       timestamp: now,
     };
 
-    // --- Emit filters: confidence, cooldown, timing ---
+    // --- Emit filters: confidence, cooldown, timing, v3 quality gates ---
     if (direction === 'WAIT') {
       return signal;
     }
@@ -311,10 +360,29 @@ export class SignalEngine {
     if (entryQuality === 'POOR') {
       return signal; // too late in the candle to act reliably
     }
+    // v3: skip low-volatility candles (no edge in a random walk)
+    if (rangeRatio < cfg.minRangeRatio) {
+      return signal;
+    }
+    // v3: require HTF trend alignment (the dominant false-signal filter)
+    if (cfg.requireTrendAlignment && !htfAligned) {
+      return signal;
+    }
 
     // Cooldown per asset
     if (now - st.lastSignalTime < cfg.cooldownMs) {
       return signal;
+    }
+
+    // v3: best-of cap — limit signals per evaluation window (quality over
+    // quantity). Implemented at the engine level via per-window bookkeeping.
+    const windowKey = Math.floor(now / (cfg.expiryMinutes * 60_000));
+    if (cfg.maxSignalsPerWindow > 0) {
+      const emittedThisWindow = this.windowEmissions.get(windowKey) ?? 0;
+      if (emittedThisWindow >= cfg.maxSignalsPerWindow) {
+        return signal;
+      }
+      this.windowEmissions.set(windowKey, emittedThisWindow + 1);
     }
 
     st.lastSignalTime = now;
@@ -563,6 +631,77 @@ export class SignalEngine {
   }
 
   // ============================================
+  // F. v3: HIGHER-TIMEFRAME TREND (multi-timeframe confirmation)
+  // ============================================
+
+  /**
+   * Aggregate the base candles into a higher timeframe (HTF) of
+   * `htfPeriod`-many base candles per HTF candle, then read the trend from
+   * the sequence of HTF closes. This is the #1 research-backed false-signal
+   * filter: only trade in the direction of the higher-timeframe trend.
+   *
+   * Returns 'UP' | 'DOWN' | 'FLAT' (FLAT = insufficient data or no trend).
+   */
+  private computeHtfTrend(candles: Candle[]): 'UP' | 'DOWN' | 'FLAT' {
+    const period = Math.max(2, this.config.htfPeriod);
+    // Only count closed candles (exclude the in-progress last candle).
+    const closed = candles.length > 0 ? candles.slice(0, -1) : candles;
+    if (closed.length < period * this.config.minHtfCandles) return 'FLAT';
+
+    // Aggregate into HTF candles by grouping `period` base candles.
+    const htfCloses: number[] = [];
+    for (let i = 0; i + period <= closed.length; i += period) {
+      const group = closed.slice(i, i + period);
+      htfCloses.push(group[group.length - 1].close);
+    }
+    if (htfCloses.length < this.config.minHtfCandles) return 'FLAT';
+
+    // Simple slope of recent HTF closes: higher-highs/higher-lows style.
+    const lookback = Math.min(htfCloses.length, 5);
+    const recent = htfCloses.slice(-lookback);
+    let up = 0;
+    let down = 0;
+    for (let i = 1; i < recent.length; i++) {
+      if (recent[i] > recent[i - 1]) up++;
+      else if (recent[i] < recent[i - 1]) down++;
+    }
+    const total = up + down;
+    if (total === 0) return 'FLAT';
+    const upRatio = up / total;
+    if (upRatio >= 0.7) return 'UP';
+    if (upRatio <= 0.3) return 'DOWN';
+    return 'FLAT';
+  }
+
+  // ============================================
+  // G. v3: VOLATILITY / RANGE FILTER
+  // ============================================
+
+  /**
+   * Ratio of the current candle's range to the average range of the recent
+   * closed candles. Low-range candles (ratio < minRangeRatio) reflect a
+   * random walk with no directional edge and are suppressed.
+   */
+  private rangeVsAverage(candles: Candle[]): number {
+    if (candles.length < 3) return 1;
+    const cur = candles[candles.length - 1];
+    const curRange = cur.high - cur.low;
+    if (curRange <= 0) return 0;
+    // Average range of the prior closed candles (exclude the in-progress last).
+    const lookback = Math.min(candles.length - 1, 10);
+    let sum = 0;
+    let n = 0;
+    for (let i = candles.length - 1 - lookback; i < candles.length - 1; i++) {
+      if (i < 0) continue;
+      sum += candles[i].high - candles[i].low;
+      n++;
+    }
+    if (n === 0) return 1;
+    const avg = sum / n;
+    return avg > 0 ? curRange / avg : 0;
+  }
+
+  // ============================================
   // CONFLUENCE HELPERS
   // ============================================
 
@@ -576,9 +715,9 @@ export class SignalEngine {
     return Math.max(pos, neg);
   }
 
-  private directionFromConfluence(fused: number, agreeing: number): Direction {
-    // Require at least 2 agreeing components for a directional call
-    if (agreeing < 2) return 'WAIT';
+  private directionFromConfluence(fused: number, agreeing: number, minAgreeing: number = 2): Direction {
+    // v3: require >= minAgreeing agreeing components for a directional call
+    if (agreeing < minAgreeing) return 'WAIT';
     if (fused > 25) return 'CALL';
     if (fused < -25) return 'PUT';
     return 'WAIT';
@@ -613,6 +752,10 @@ export class SignalEngine {
     if (c.regime !== 'UNCLEAR') {
       reasons.push(`Regime: ${c.regime} (autocorr-strength ${(c.regimeStrength).toFixed(2)})`);
     }
+    if (c.htfTrend !== 'FLAT') {
+      reasons.push(`HTF trend: ${c.htfTrend} (${c.htfAligned ? 'aligned' : 'NOT aligned — suppressed'})`);
+    }
+    reasons.push(`Confluence: ${c.agreeing}/4 components agree | range ratio ${c.rangeRatio.toFixed(2)}`);
     if (reasons.length === 0) {
       reasons.push('No strong confluence — components not aligned');
     }

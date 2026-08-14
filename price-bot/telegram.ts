@@ -145,6 +145,7 @@ export class TelegramNotifier {
     lines.push(`  • OFI: <code>${fmt(c.ofi)}</code>  • Candle: <code>${fmt(c.candleSignal)}</code> [${esc(c.candlePattern)}]`);
     lines.push(`  • Momentum: <code>${fmt(c.momentum)}</code>${c.momentumDecay > 0.5 ? ' (decaying)' : ''}  • Structure: <code>${fmt(c.structure)}</code> [${esc(c.structureLabel)}]`);
     lines.push(`  • Regime: <b>${esc(c.regime)}</b> (strength ${c.regimeStrength.toFixed(2)})`);
+    lines.push(`  • HTF trend: <b>${esc(c.htfTrend)}</b> ${c.htfAligned ? '✅ aligned' : '⚠️ NOT aligned'} | Confluence ${c.agreeing}/4 | range ${c.rangeRatio.toFixed(2)}`);
     lines.push('');
     lines.push('📝 <b>Reasons:</b>');
     for (const r of s.reasons) lines.push(`  • ${esc(r)}`);
@@ -156,7 +157,7 @@ export class TelegramNotifier {
 
   /** Startup/connectivity confirmation. */
   async sendStartup(): Promise<boolean> {
-    return this.send('✅ <b>Pocket Option OTC Signal Bot</b> is online.\nLive capture + leading signal engine active. Signals will be delivered here.');
+    return this.send('✅ <b>Pocket Option OTC Signal Bot</b> is online (v3 quality engine).\nLive capture + leading signal engine active. High-confidence, trend-aligned signals only — fewer but better. Signals will be delivered here.');
   }
 
   /** Periodic heartbeat with live prices. */

@@ -35,7 +35,7 @@ import * as http from 'http';
 function parseArgs(): { expiry: ExpiryMinutes; confidence: number; assets: string[] } {
   const args = process.argv.slice(2);
   let expiry: ExpiryMinutes = 1;
-  let confidence = 68;
+  let confidence = 72;
   const assets = [
     'EURUSD_otc',
     'GBPUSD_otc',
@@ -129,8 +129,9 @@ async function main() {
   });
 
   // --- Periodic evaluation inside the candle (catches signals between closes) ---
-  // Evaluate each asset every 5 seconds so signals can fire in the last part
-  // of the current candle even if no candle close happens.
+  // v3: evaluate every 15s (not 5s) — less noise, signals are deliberate.
+  // Quality over quantity: the engine's own filters (HTF alignment, 3+ agreeing,
+  // volatility gate, best-of-per-window) do the heavy lifting.
   const evalTimer = setInterval(() => {
     for (const asset of assets) {
       const candles = bot.getCandles(asset);
@@ -139,7 +140,7 @@ async function main() {
         engine.evaluate(asset, candles, price);
       }
     }
-  }, 5000);
+  }, 15000);
 
   await bot.connect();
 
@@ -191,7 +192,7 @@ async function main() {
       const candles = bot.getCandles(a.id);
       if (price > 0 && candles.length > 0) {
         const s = engine.evaluate(a.id, candles, price);
-        const comp = `ofi:${s.components.ofi} can:${s.components.candleSignal} mom:${s.components.momentum} str:${s.components.structure}`;
+        const comp = `ofi:${s.components.ofi} can:${s.components.candleSignal} mom:${s.components.momentum} str:${s.components.structure} htf:${s.components.htfTrend}${s.components.htfAligned ? '' : 'x'} ${s.components.agreeing}/4`;
         if (!best || Math.abs(s.confidence) > best.conf) {
           best = { id: a.id, dir: s.direction, conf: s.confidence, comp };
         }
@@ -260,6 +261,8 @@ function printSignal(s: Signal): void {
   console.log(`    Momentum:       ${s.components.momentum > 0 ? '+' : ''}${s.components.momentum}${s.components.momentumDecay > 0.5 ? '  (decaying)' : ''}`);
   console.log(`    Structure:      ${s.components.structure > 0 ? '+' : ''}${s.components.structure}  [${s.components.structureLabel}]`);
   console.log(`    Regime:         ${s.components.regime}  (strength ${s.components.regimeStrength.toFixed(2)})`);
+  console.log(`    HTF Trend:      ${s.components.htfTrend}  (${s.components.htfAligned ? 'aligned' : 'NOT aligned'})`);
+  console.log(`    Confluence:     ${s.components.agreeing}/4 agree | range ratio ${s.components.rangeRatio.toFixed(2)}`);
   console.log('  -----------------------------------------');
   console.log('  Reasons:');
   for (const r of s.reasons) {
