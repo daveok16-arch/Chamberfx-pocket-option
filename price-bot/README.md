@@ -1,41 +1,50 @@
-# Pocket Option Trading Bot v1.0
+# Pocket Option OTC Signal Bot
 
-A comprehensive trading bot that captures real-time price data from Pocket Option OTC (Over-The-Counter) currency pairs and generates trading signals based on technical analysis.
+A signal bot that captures **real-time OTC price data** from Pocket Option and
+predicts the **next candlestick direction** (CALL/PUT/WAIT) using only
+**leading, non-lagging** indicators. Deliberately avoids lagging/smoothing
+indicators (EMA, RSI, MACD, Bollinger Bands) — they confirm moves *after* they
+happen, which is useless when you must predict the *next* candle.
 
 ## Features
 
 - **Real-time Price Capture**: Live tick data via WebSocket (Socket.IO protocol)
-- **Technical Analysis**: EMA, RSI, MACD, Bollinger Bands, ADX, ATR
-- **Signal Generation**: CALL/PUT/WAIT signals based on indicator confluence
-- **Trade Tracking**: Record trades, wins, losses, and performance
-- **Auto-Discovery**: Playwright automatically discovers WebSocket session
-- **Multi-Asset**: Monitor up to 6 OTC pairs simultaneously
+- **Leading Signal Engine**: Order-flow imbalance, candle anatomy/rejection,
+  tick momentum/decay, and market structure — fused by weighted confluence
+- **Regime-Adaptive**: lag-1 return autocorrelation detects trend vs mean-revert
+  and flips continuation components accordingly (reversal signals never flipped)
+- **Quality Filters (v3)**: higher-timeframe trend alignment, volatility/range
+  gate, 3+ confluence, best-of-per-window, per-asset cooldown, ≥72 confidence
+- **Signal Generation**: CALL/PUT/WAIT signals with confidence + reasons
+- **Telegram Delivery**: optional, formats signals and sends a periodic heartbeat
+- **Auto-Discovery**: Playwright automatically discovers the WebSocket session
+- **Multi-Asset**: Monitor 6 OTC pairs simultaneously
+- **Health Endpoint**: tiny HTTP `/health` server for platform health checks
 
 ## Quick Start
 
 ```bash
 npm install
-npm run trading
+npx playwright install chromium
+npx tsx signal-bot.ts --expiry 1 --confidence 72
 ```
 
-## Trading Bot (`trading-bot.ts`)
+## Signal Engine (`signal.ts`)
 
-The trading bot provides:
-- Live price monitoring
-- Technical indicator calculation
-- Automatic signal generation
-- Trade tracking and performance metrics
-- Colorful CLI dashboard
+The `SignalEngine` predicts the next candle direction from four leading inputs:
 
-## Features
+- **A. Order-Flow Imbalance (OFI)** — net UP/DOWN tick pressure over a rolling
+  window, weighted by each tick's *relative* move (scale-invariant across assets).
+- **B. Candle Anatomy / Rejection** — rejection wicks + engulfing (reversal,
+  never regime-flipped) and marubozu/body conviction (continuation, flipped).
+- **C. Tick Velocity & Momentum Decay** — rate of change + exhaustion detection.
+- **D. Market Structure** — higher-highs/lows vs lower-highs/lows sequence.
 
-- **Real-time Price Capture**: Connects to Pocket Option WebSocket and captures live tick data
-- **Multiple Asset Support**: Tracks up to 9 major OTC currency pairs simultaneously
-- **Candle Building**: Automatically builds 1-minute candles from tick data
-- **Session Auto-Discovery**: Uses Playwright to automatically discover WebSocket connection parameters
-- **Auto-Reconnection**: Automatically reconnects on connection loss with exponential backoff
-- **Price History**: Maintains tick history for each asset
-- **Export**: Saves prices to JSON file periodically
+A regime layer (lag-1 return autocorrelation) decides whether continuation
+components are flipped (mean-revert) or kept (trend); rejection signals are
+never flipped. v3 adds a higher-timeframe trend filter, a volatility gate, a
+3+ confluence requirement, and a best-of-per-window cap so only high-conviction,
+trend-aligned setups fire. See `AGENTS.md` for the full design + accuracy history.
 
 ## Supported OTC Pairs
 
@@ -96,7 +105,7 @@ The trading bot provides:
        │                                     │
        │  7. Subscribe to Assets             │
        │     42["changeSymbol",{"asset":     │
-       │        "EURUSD_otc","period":60}]   │
+       │        "EURUSD_otc","period":60}]   │  (period = candlePeriod = expiry*60)
        │────────────────────────────────────►│
 ```
 
@@ -122,7 +131,7 @@ Ticks: 1.08530 → 1.08535 → 1.08540 → 1.08538 → 1.08542
                                                     │
                                                     ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  1-Minute Candle                                          │
+│  Candle (period = candlePeriod, default/expiry 60s = 1m)   │
 ├─────────────────────────────────────────────────────────────┤
 │  Open:  1.08530  (first tick)                             │
 │  High:  1.08542  (max tick)                               │
@@ -131,6 +140,11 @@ Ticks: 1.08530 → 1.08535 → 1.08540 → 1.08538 → 1.08542
 │  Volume: 5      (tick count)                              │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+Candle period follows the signal expiry (`candlePeriod = expiry * 60`), so 3m
+and 5m expiries build/seed 3m and 5m candles. Timestamps come from Pocket
+Option's server clock (~2h ahead of the container clock); timing math in the
+engine is anchored to candle boundaries, not `Date.now()`.
 
 ## Installation
 
@@ -143,7 +157,22 @@ npm install
 ### Start the bot
 
 ```bash
-npm run dev
+npx tsx signal-bot.ts --expiry 1 --confidence 72
+# or: npm run signal
+```
+
+### Run the price-capture engine standalone
+
+```bash
+npx tsx server.ts
+# or: npm run capture
+```
+
+### Validate accuracy against the live feed
+
+```bash
+npx tsx accuracy-test.ts --expiry 1 --minutes 18
+# or: npm run test:accuracy -- --expiry 1 --minutes 18
 ```
 
 ### Programmatic Usage
@@ -196,6 +225,7 @@ bot.disconnect();
 | `getTickHistory(assetId)` | Get tick history | Tick[] |
 | `getAssetList()` | Get all asset info | AssetInfo[] |
 | `isConnected()` | Check connection status | boolean |
+| `getServerTime()` | Pocket Option server-clock ms (for clock-skew-safe timing) | number |
 | `savePricesToFile()` | Save prices to JSON | void |
 
 ### Events

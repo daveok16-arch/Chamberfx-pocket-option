@@ -34,8 +34,9 @@ import * as http from 'http';
 
 function parseArgs(): { expiry: ExpiryMinutes; confidence: number; assets: string[] } {
   const args = process.argv.slice(2);
-  let expiry: ExpiryMinutes = 1;
-  let confidence = 72;
+  // Defaults may be overridden by Render env vars (render.yaml sets EXPIRY/CONFIDENCE).
+  let expiry: ExpiryMinutes = envExpiry();
+  let confidence = envConfidence(72);
   const assets = [
     'EURUSD_otc',
     'GBPUSD_otc',
@@ -55,6 +56,18 @@ function parseArgs(): { expiry: ExpiryMinutes; confidence: number; assets: strin
     }
   }
   return { expiry, confidence, assets };
+}
+
+/** EXPIRY env var → minutes (1|3|5). Falls back to 1. */
+function envExpiry(): ExpiryMinutes {
+  const v = Number(process.env.EXPIRY);
+  return v === 3 || v === 5 ? v : 1;
+}
+
+/** CONFIDENCE env var → 0-100. Falls back to the provided default. */
+function envConfidence(def: number): number {
+  const v = Number(process.env.CONFIDENCE);
+  return Number.isFinite(v) && v > 0 ? v : def;
 }
 
 // ============================================
@@ -91,11 +104,15 @@ async function main() {
   });
 
   // Capture engine
+  // candlePeriod MUST match the signal expiry (fix #1): the engine predicts
+  // the next candle of `expiry` minutes, so the live candles built from ticks
+  // and the history seeded from Pocket Option must be at the same granularity.
   const bot = new PocketOptionPriceBot({
     verbose: false, // suppress per-tick noise; signals are the focus
     saveToFile: true,
     outputFile: './live-prices.json',
     defaultAssets: assets,
+    candlePeriod: expiry * 60,
   });
 
   // --- Wire ticks → signal engine ---
@@ -105,12 +122,13 @@ async function main() {
 
   // --- Evaluate on every candle close ---
   // A candle close = the capture engine just appended a new candle.
-  // We evaluate the asset whose candle just closed.
+  // We evaluate the asset whose candle just closed. Pass the SERVER clock
+  // (fix #2) so the engine's timing math aligns with candle boundaries.
   bot.onCandle((candle) => {
     const candles = bot.getCandles(candle.assetId);
     const price = bot.getPrice(candle.assetId);
     if (price > 0) {
-      engine.evaluate(candle.assetId, candles, price);
+      engine.evaluate(candle.assetId, candles, price, bot.getServerTime(), payoutFor(bot, candle.assetId));
     }
   });
 
@@ -133,11 +151,12 @@ async function main() {
   // Quality over quantity: the engine's own filters (HTF alignment, 3+ agreeing,
   // volatility gate, best-of-per-window) do the heavy lifting.
   const evalTimer = setInterval(() => {
+    const serverNow = bot.getServerTime();
     for (const asset of assets) {
       const candles = bot.getCandles(asset);
       const price = bot.getPrice(asset);
       if (price > 0 && candles.length > 0) {
-        engine.evaluate(asset, candles, price);
+        engine.evaluate(asset, candles, price, serverNow, payoutFor(bot, asset));
       }
     }
   }, 15000);
@@ -161,7 +180,10 @@ async function main() {
       res.end(JSON.stringify({
         status: 'ok',
         uptime: process.uptime(),
-        connected: true,
+        // Reflect the actual capture-engine connection state (fix #18): a
+        // hardcoded `true` would make the health check pass while the WS is
+        // down and mid-reconnect, hiding outages from Render.
+        connected: bot.isConnected(),
         assets: prices.size,
         prices: Object.fromEntries(prices),
         recentSignals: lastSignals.length,
@@ -184,6 +206,7 @@ async function main() {
   const statusTimer = setInterval(() => {
     const assets = bot.getAssetList();
     const candleTotals = assets.map(a => `${a.id.split('_')[0]}:${a.candles.length}`).join(' ');
+    const serverNow = bot.getServerTime();
 
     // Show the best (highest |confidence|) live evaluation for visibility
     let best: { id: string; dir: string; conf: number; comp: string } | null = null;
@@ -191,7 +214,7 @@ async function main() {
       const price = bot.getPrice(a.id);
       const candles = bot.getCandles(a.id);
       if (price > 0 && candles.length > 0) {
-        const s = engine.evaluate(a.id, candles, price);
+        const s = engine.evaluate(a.id, candles, price, serverNow, payoutFor(bot, a.id));
         const comp = `ofi:${s.components.ofi} can:${s.components.candleSignal} mom:${s.components.momentum} str:${s.components.structure} htf:${s.components.htfTrend}${s.components.htfAligned ? '' : 'x'} ${s.components.agreeing}/4`;
         if (!best || Math.abs(s.confidence) > best.conf) {
           best = { id: a.id, dir: s.direction, conf: s.confidence, comp };
@@ -237,17 +260,27 @@ async function main() {
 }
 
 // ============================================
+// HELPERS
+// ============================================
+
+/** Look up the broker payout fraction for an asset (0..1), defaulting to 0.92. */
+function payoutFor(bot: PocketOptionPriceBot, assetId: string): number {
+  const a = bot.getAssetList().find(x => x.id === assetId);
+  return a && a.payout > 0 ? a.payout : 0.92;
+}
+
+// ============================================
 // SIGNAL PRINTER
 // ============================================
 
 function printSignal(s: Signal): void {
   const emoji = s.direction === 'CALL' ? '🟢' : s.direction === 'PUT' ? '🔴' : '⚪';
   const time = new Date(s.timestamp).toISOString().split('T')[1].slice(0, 8);
-  const payout = ''; // payout can be read from live-prices.json if needed
+  const payoutPct = Math.round(s.payout * 100);
 
   console.log('');
   console.log('===========================================');
-  console.log(`${emoji} ${s.direction} SIGNAL — ${s.assetId} ${payout}`);
+  console.log(`${emoji} ${s.direction} SIGNAL — ${s.assetId} (payout ${payoutPct}%)`);
   console.log('===========================================');
   console.log(`  Entry Price:   ${s.entryPrice.toFixed(5)}`);
   console.log(`  Confidence:    ${s.confidence}%`);

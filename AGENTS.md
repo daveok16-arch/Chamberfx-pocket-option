@@ -172,3 +172,62 @@ real volatility AND confidence >=72 AND it's the best setup of that window AND
 VALIDATION: re-run `accuracy-test.ts --expiry 1 --minutes 30` against the live
 feed to measure v3 win rate. Compare to v2 (51.4% all / 64.7% at >=50). Expect
 fewer decided trades but a higher hit rate, especially on trend-aligned setups.
+
+## Signal Engine v3.1 — Weakness Fixes (2026-08-14)
+Audited + fixed the top implementation weaknesses from the v3 audit. All changes
+typecheck clean (`npx tsc --noEmit` exit 0). No behavior change to the leading-
+indicator design; these are correctness/robustness fixes.
+
+1. **Candle-period now matches expiry (was hardcoded 60s).** `updateCandles`
+   and `subscribeAsset` use `candlePeriod` (default 60s). `signal-bot.ts` sets
+   `candlePeriod: expiry * 60`, and the changeSymbol subscription period matches,
+   so 3m/5m expiries now build/seed 3m/5m candles (the engine no longer reasons
+   about 1m candles while predicting a 5m candle). Added `subscribePeriod?` cfg.
+2. **Clock-skew-safe timing.** Candle boundaries are server-clock (~2h ahead of
+   container `Date.now()`). `evaluate()` now anchors `now` to the current
+   candle's bucket when the supplied `now` is outside it, and `signal-bot.ts`
+   passes `bot.getServerTime()` (server clock from last tick) to every
+   `evaluate()` call. `timeRemainingInCandle`/`entryQuality` are now correct in
+   production. Added `PocketOptionPriceBot.getServerTime()`.
+3. **Regime excludes the in-progress candle.** `computeRegime` looped to
+   `candles.length` (included the unstable last candle) despite its comment
+   saying otherwise; fixed to `candles.length - 1`.
+4. **OFI is now scale-invariant.** Replaced the `mag * 1e5` weighting (which
+   saturated on XAUUSD and went inert on USDJPY) with a relative-move weighting
+   (`abs(delta)/prevPrice`), so the imbalance behaves identically across assets.
+   Targeted cause of the documented per-asset accuracy variance.
+5. **Reconnect no longer duplicates candles.** `processHistoryData` dedups by
+   `openTime` (Set) and sorts before trimming, so a reconnect re-seed can't
+   corrupt structure/regime/HTF. `updateCandles` also checks the candle tail
+   first (avoids O(n) scan + handles tick gaps).
+
+Cleanups: `windowEmissions` Map pruned (was an unbounded leak over long runs);
+`normalizeAssetId` uses strict exact/`_otc`-suffix matching (no more loose
+`includes()` cross-mapping); binary Socket.IO state machine resets pending state
+on an intervening `42` event (no desync); `package.json` dropped missing-file
+scripts (`trading-bot.ts`/`telegram-bot.ts`/`server.js` main, `ts-node`) and
+added `typecheck`/`capture`/`test:accuracy`; `price-bot/Dockerfile` confidence
+aligned to 72 (was divergent 50); `signal-bot.ts` reads `EXPIRY`/`CONFIDENCE`
+env vars (render.yaml overrides now actually work); `/health` reports real
+`bot.isConnected()` (was hardcoded `true`); `Signal.payout` added and displayed
+in console + Telegram (real per-asset payout, was blank/hardcoded 0.92 display).
+
+### Minor-findings round (2026-08-14)
+- **Stale docs fixed.** `price-bot/README.md` described the old EMA/RSI/MACD/
+  Bollinger/ADX/ATR engine + `trading-bot.ts`/`npm run trading`/`npm run dev`;
+  rewritten to the leading-indicator engine, with the candle-period diagram,
+  `getServerTime()` in the API table, and current run commands. Root `README.md`
+  confidence defaults fixed (68/50 → 72; quickstart `--confidence 50` → 72) and
+  notes that `EXPIRY`/`CONFIDENCE` env vars are honored.
+- **Regime low-variance guard (#6).** `computeRegime` now returns UNCLEAR when
+  the average absolute candle return is negligible (< 1e-6 of price) — a
+  random-walk band where the lag-1 autocorrelation sign is rounding noise, so
+  committing to TREND/MEAN_REVERT there would flip on garbage. Mitigates the
+  documented small-sample autocorrelation weakness without a redesign.
+- **Agreement threshold is now config (#7).** Added `agreeThreshold` (default
+  15, was a hardcoded magic constant) so the confluence gate isn't driven by
+  marginal +16 noise and is tunable per deployment.
+- **Confidence documented as heuristic (#8).** Added an explicit comment that
+  confidence is a hand-tuned conviction ranking, NOT a calibrated probability,
+  and that win-rate-by-tier claims need large-sample re-validation (v2's 64.7%
+  was n=17). No fake-precision calibration added.

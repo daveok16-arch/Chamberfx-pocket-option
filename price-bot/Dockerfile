@@ -40,6 +40,6 @@ EXPOSE 10000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD node -e "fetch('http://localhost:'+ (process.env.PORT||10000) +'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-# Default: 1-minute expiry, trade only >=50 confidence signals (64.7% live win rate).
+# Default: 1-minute expiry, trade only >=72 confidence, trend-aligned signals (v3 quality engine).
 # Override EXPIRY / CONFIDENCE via env on Render if desired.
-CMD ["npx", "tsx", "signal-bot.ts", "--expiry", "1", "--confidence", "50"]
+CMD ["npx", "tsx", "signal-bot.ts", "--expiry", "1", "--confidence", "72"]

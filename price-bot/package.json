@@ -3,14 +3,13 @@
   "version": "1.0.0",
   "description": "Trading bot for Pocket Option OTC pairs - Live prices, technical analysis, signals",
   "type": "module",
-  "main": "server.js",
   "scripts": {
-    "dev": "tsx server.ts",
-    "trading": "tsx trading-bot.ts",
-    "signal": "tsx signal-bot.ts",
-    "telegram": "tsx telegram-bot.ts",
     "start": "tsx signal-bot.ts --expiry 1 --confidence 72",
+    "signal": "tsx signal-bot.ts",
     "render:start": "tsx signal-bot.ts --expiry 1 --confidence 72",
+    "capture": "tsx server.ts",
+    "test:accuracy": "tsx accuracy-test.ts",
+    "typecheck": "tsc --noEmit",
     "build": "tsc",
     "postinstall": "playwright install chromium --with-deps"
   },
@@ -21,7 +20,6 @@
   "devDependencies": {
     "@types/node": "^22.14.0",
     "@types/ws": "^8.18.1",
-    "ts-node": "^10.9.2",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2"
   }

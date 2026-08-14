@@ -52,6 +52,7 @@ export interface Signal {
   direction: Direction;
   confidence: number;          // 0-100
   entryPrice: number;
+  payout: number;              // broker payout fraction 0..1 (e.g. 0.92)
   expiryMinutes: ExpiryMinutes;
   timeRemainingSec: number;    // seconds left in the current candle
   entryQuality: 'EXCELLENT' | 'GOOD' | 'FAIR' | 'POOR';
@@ -114,6 +115,9 @@ export interface SignalEngineConfig {
   maxSignalsPerWindow: number;
   /** v3: minimum number of agreeing components required for a directional call */
   minAgreeing: number;
+  /** v3: |component score| must exceed this to count as "agreeing" (default 15).
+   *  Tunable so the confluence gate isn't driven by marginal +16 noise. */
+  agreeThreshold: number;
 }
 
 export const DEFAULT_CONFIG: SignalEngineConfig = {
@@ -136,6 +140,7 @@ export const DEFAULT_CONFIG: SignalEngineConfig = {
   minRangeRatio: 0.6,     // skip candles with range < 60% of recent avg (no edge)
   maxSignalsPerWindow: 1, // best-of per candle window (quality over quantity)
   minAgreeing: 3,         // require 3+ agreeing components for a directional call
+  agreeThreshold: 15,    // |score| > 15 counts as agreeing (tunable, was hardcoded)
 };
 
 // ============================================
@@ -210,7 +215,8 @@ export class SignalEngine {
     assetId: string,
     candles: Candle[],
     lastPrice: number,
-    now: number = Date.now()
+    now: number = Date.now(),
+    payout: number = 0.92
   ): Signal {
     const cfg = this.config;
     const st = this.states.get(assetId);
@@ -221,7 +227,24 @@ export class SignalEngine {
       htfTrend: 'FLAT', htfAligned: false, rangeRatio: 0, agreeing: 0,
     };
 
-    const timeRemainingSec = this.timeRemainingInCandle(now, cfg.expiryMinutes);
+    // --- Clock-skew-safe timing (fix #2) ---
+    // Candle openTime/closeTime carry Pocket Option's SERVER clock (~2h ahead
+    // of the container Date.now()). Timing (time-remaining / entry quality)
+    // MUST be computed against the server clock, else labels are wrong by the
+    // skew. If we have candles, anchor `now` to the current candle's bucket.
+    const periodMs = cfg.expiryMinutes * 60_000;
+    let serverNow = now;
+    if (candles.length > 0) {
+      const cur = candles[candles.length - 1];
+      // If the supplied `now` falls inside the current candle's [openTime, closeTime],
+      // use it directly; otherwise (skew) clamp to the candle's closeTime so the
+      // computed time-remaining reflects the real in-candle position.
+      if (now < cur.openTime || now > cur.closeTime + periodMs) {
+        serverNow = cur.closeTime; // treat as "just before this candle closes"
+      }
+    }
+
+    const timeRemainingSec = this.timeRemainingInCandle(serverNow, cfg.expiryMinutes);
     const entryQuality = this.entryQuality(timeRemainingSec, cfg.expiryMinutes);
 
     const waitSignal: Signal = {
@@ -229,6 +252,7 @@ export class SignalEngine {
       direction: 'WAIT',
       confidence: 0,
       entryPrice: lastPrice,
+      payout,
       expiryMinutes: cfg.expiryMinutes,
       timeRemainingSec,
       entryQuality,
@@ -315,9 +339,13 @@ export class SignalEngine {
     components.agreeing = agreeing;
     const direction = this.directionFromConfluence(fused, agreeing, cfg.minAgreeing);
 
-    // Confidence scales the magnitude of agreement, boosted by confluence
-    // count and regime strength (a strong regime = higher-conviction signal),
-    // dampened by momentum decay (exhaustion = lower confidence).
+    // Confidence: a HEURISTIC CONVICTION RANKING, not a calibrated probability.
+    // (#8) The additive bonuses (agreeing*4, regimeStrength*20, decay*15, ±HTF/8,
+    // reversal/6, MEAN_REVERT/-8) are hand-tuned constants, not fitted against a
+    // held-out set. Treat the number as a relative ordering ("higher = more
+    // components agreed more strongly") for filtering, NOT as P(win). Any claim
+    // of a win-rate-by-confidence tier needs re-validation on a large live sample
+    // (the v2 "64.7% at >=50" was n=17 — indicative only).
     let confidence = Math.round(Math.abs(fused));
     confidence += agreeing * 4; // reward multi-factor agreement
     confidence += Math.round(regime.strength * 20); // strong regime bonus
@@ -342,6 +370,7 @@ export class SignalEngine {
       direction,
       confidence,
       entryPrice: lastPrice,
+      payout,
       expiryMinutes: cfg.expiryMinutes,
       timeRemainingSec,
       entryQuality,
@@ -376,6 +405,8 @@ export class SignalEngine {
 
     // v3: best-of cap — limit signals per evaluation window (quality over
     // quantity). Implemented at the engine level via per-window bookkeeping.
+    // The window key is the candle bucket; we keep only the current + previous
+    // bucket so the map cannot grow unbounded over a long-running deployment.
     const windowKey = Math.floor(now / (cfg.expiryMinutes * 60_000));
     if (cfg.maxSignalsPerWindow > 0) {
       const emittedThisWindow = this.windowEmissions.get(windowKey) ?? 0;
@@ -383,6 +414,10 @@ export class SignalEngine {
         return signal;
       }
       this.windowEmissions.set(windowKey, emittedThisWindow + 1);
+      // Prune stale windows (keep only the current bucket + the previous one).
+      for (const key of this.windowEmissions.keys()) {
+        if (key < windowKey - 1) this.windowEmissions.delete(key);
+      }
     }
 
     st.lastSignalTime = now;
@@ -408,17 +443,23 @@ export class SignalEngine {
     const dirs = st.recentDirs.slice(-n);
     const prices = st.recentPrices.slice(-n);
 
-    // Weighted by per-tick price magnitude (proxy for order size/urgency)
+    // Scale-invariant order-flow weighting (fix #4): the v1 scheme multiplied
+    // raw price deltas by a fixed 1e5 constant, which is scale-dependent — on
+    // XAUUSD (~2000) deltas dwarf the constant and saturate the score, while on
+    // USDJPY (~150, tiny deltas) it reduces to a plain direction count, causing
+    // the documented per-asset accuracy variance. Instead weight each tick by
+    // its move as a FRACTION of the rolling price level (dimensionless), so the
+    // imbalance behaves identically across EURUSD / USDJPY / XAUUSD.
     let pressure = 0;
-    for (let i = 0; i < dirs.length; i++) {
-      const mag = i > 0 ? Math.abs(prices[i] - prices[i - 1]) : 0;
-      pressure += dirs[i] * (1 + mag * 1e5); // scale magnitude to a usable factor
-    }
-    // Normalize to -1..+1 via the sum of absolute magnitudes
     let absSum = 0;
     for (let i = 0; i < dirs.length; i++) {
-      const mag = i > 0 ? Math.abs(prices[i] - prices[i - 1]) : 0;
-      absSum += (1 + mag * 1e5);
+      // Relative move of this tick vs the previous one (0 for the first tick).
+      const relMag = i > 0 && prices[i - 1] > 0
+        ? Math.abs(prices[i] - prices[i - 1]) / prices[i - 1]
+        : 0;
+      const w = 1 + relMag * 1e4; // relative pip-scale; dimensionless across assets
+      pressure += dirs[i] * w;
+      absSum += w;
     }
     const ofiRatio = absSum > 0 ? pressure / absSum : 0; // -1..+1
 
@@ -599,17 +640,36 @@ export class SignalEngine {
   private computeRegime(candles: Candle[]): { label: string; strength: number } {
     // Use as many recent CLOSED candles as available (exclude the in-progress
     // last candle so the regime reflects completed returns only). Need >=5 for
-    // a usable autocorrelation estimate.
+    // a usable autocorrelation estimate. The in-progress candle's close keeps
+    // changing, so including it injects look-ahead/noise into the estimate.
     const usable = candles.length - 1;
     if (usable < 5) return { label: 'UNCLEAR', strength: 0 };
 
     const lookback = Math.min(usable, 20);
     const rets: number[] = [];
-    for (let i = candles.length - lookback; i < candles.length; i++) {
+    // Loop to candles.length - 1 (exclusive of the in-progress last candle).
+    for (let i = candles.length - lookback; i < candles.length - 1; i++) {
+      if (i < 0) continue;
       const r = candles[i].open !== 0 ? (candles[i].close - candles[i].open) / candles[i].open : 0;
       rets.push(r);
     }
     if (rets.length < 5) return { label: 'UNCLEAR', strength: 0 };
+
+    // Robustness guard (#6): lag-1 autocorrelation on only 5-20 one-minute
+    // returns is a noisy estimator. When the return magnitude is negligible
+    // (candles barely moved — a random-walk/noise band), the autocorrelation
+    // sign is dominated by rounding noise rather than any real regime, so
+    // committing to TREND/MEAN_REVERT there flips continuation components on
+    // garbage. Require a minimum average absolute return (vs the price level)
+    // before trusting the estimate; otherwise treat as UNCLEAR (which the
+    // caller fades/dampens rather than committing).
+    const level = candles[candles.length - 2].close || 1;
+    let absRetSum = 0;
+    for (const r of rets) absRetSum += Math.abs(r);
+    const avgAbsRet = absRetSum / rets.length;
+    if (level > 0 && avgAbsRet < 1e-6) {
+      return { label: 'UNCLEAR', strength: 0 };
+    }
 
     // Lag-1 autocorrelation: corr(ret[t], ret[t-1])
     const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
@@ -706,11 +766,12 @@ export class SignalEngine {
   // ============================================
 
   private countAgreement(...scores: number[]): number {
+    const t = this.config.agreeThreshold;
     let pos = 0;
     let neg = 0;
     for (const s of scores) {
-      if (s > 15) pos++;
-      else if (s < -15) neg++;
+      if (s > t) pos++;
+      else if (s < -t) neg++;
     }
     return Math.max(pos, neg);
   }

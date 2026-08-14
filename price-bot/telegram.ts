@@ -133,9 +133,10 @@ export class TelegramNotifier {
     const emoji = s.direction === 'CALL' ? '🟢📈' : s.direction === 'PUT' ? '🔴📉' : '⚪';
     const asset = s.assetId.replace('_otc', '/OTC');
     const c = s.components;
+    const payoutPct = Math.round(s.payout * 100);
 
     const lines: string[] = [];
-    lines.push(`${emoji} <b>${s.direction} SIGNAL</b> — ${asset}`);
+    lines.push(`${emoji} <b>${s.direction} SIGNAL</b> — ${asset} (payout ${payoutPct}%)`);
     lines.push('');
     lines.push(`💰 <b>Entry:</b> <code>${s.entryPrice.toFixed(5)}</code>`);
     lines.push(`🎯 <b>Confidence:</b> <b>${s.confidence}%</b>`);

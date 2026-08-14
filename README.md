@@ -54,11 +54,12 @@ npx playwright install chromium
 export TELEGRAM_BOT_TOKEN="<from @BotFather>"
 export TELEGRAM_CHAT_ID="<your chat id>"
 
-# Run: 1-minute expiry, only emit ≥50-confidence signals
-npx tsx signal-bot.ts --expiry 1 --confidence 50
+# Run: 1-minute expiry, only emit ≥72-confidence signals (v3 quality engine)
+npx tsx signal-bot.ts --expiry 1 --confidence 72
 ```
 
-CLI flags: `--expiry 1|3|5` (default 1), `--confidence N` (default 68).
+CLI flags: `--expiry 1|3|5` (default 1), `--confidence N` (default 72). Both
+also accept the `EXPIRY` / `CONFIDENCE` environment variables (used by Render).
 
 Validate accuracy yourself:
 ```bash
@@ -94,7 +95,7 @@ This repo is configured for Render via the `render.yaml` blueprint and a Dockerf
 | `TELEGRAM_CHAT_ID` | yes (for signals) | Target chat/channel id |
 | `PORT` | no (default 10000) | HTTP health server port (Render sets this) |
 | `EXPIRY` | no (default 1) | Trade expiry in minutes |
-| `CONFIDENCE` | no (default 50) | Minimum signal confidence to emit |
+| `CONFIDENCE` | no (default 72) | Minimum signal confidence to emit |
 
 > If the Telegram env vars are absent, the bot still runs — it logs signals to the console and `signals.jsonl`, and prints a warning. It does **not** crash.
 

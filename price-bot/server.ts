@@ -70,8 +70,14 @@ export interface PriceCaptureConfig {
   reconnectDelay: number;
   /** Max reconnection attempts */
   maxReconnectAttempts: number;
-  /** Candle period in seconds (default 60 = 1-minute candles) */
+  /** Candle period in seconds (default 60 = 1-minute candles).
+   *  Must match the signal expiry (1/3/5 minutes → 60/180/300) so the
+   *  candles built from ticks align with the period the engine predicts. */
   candlePeriod: number;
+  /** Subscription period (seconds) sent to Pocket Option in the changeSymbol
+   *  packet. Defaults to candlePeriod. Pocket Option returns history at this
+   *  granularity, so it must match candlePeriod for correct seeding. */
+  subscribePeriod?: number;
 }
 
 // ============================================
@@ -375,8 +381,12 @@ export class PocketOptionPriceBot {
       return;
     }
 
-    // Standard Socket.IO event message (42)["eventName",data]
+    // Standard Socket.IO event message (42)["eventName",data]. If we had a
+    // pending binary placeholder that never got its binary frame (e.g. an
+    // intervening 42 event arrived out of order), drop the stale pending state
+    // so the state machine cannot desync and swallow later frames.
     if (msg.startsWith("42")) {
+      this.pendingBinaryEvent = null;
       this.processSocketIOEvent(msg.substring(2));
     }
   }
@@ -499,35 +509,38 @@ export class PocketOptionPriceBot {
   }
 
   private normalizeAssetId(rawId: string): string {
-    // Normalize various ID formats
+    // Normalize various ID formats to a known asset id. Use strict matching to
+    // avoid cross-mapping short ids (e.g. "USD") to the wrong asset — only an
+    // exact match or a matched "_otc"/non-_otc variant is accepted.
     let id = rawId.replace(/^#/, "").toUpperCase();
-    
-    // Check if it's a known asset
+
+    // 1) Exact match (case-insensitive, leading '#' stripped).
     for (const assetId of this.assets.keys()) {
-      const normalizedAsset = assetId.replace(/^#/, "").toUpperCase();
-      if (id === normalizedAsset || id.includes(normalizedAsset) || normalizedAsset.includes(id)) {
-        return assetId;
-      }
+      if (assetId.replace(/^#/, "").toUpperCase() === id) return assetId;
     }
-    
-    // Try to match by stripping suffixes
+
+    // 2) Same base with an optional "_otc" suffix: EURUSD <-> EURUSD_otc.
+    const baseOf = (s: string) => s.replace(/^#/, "").toUpperCase().replace(/_OTC$/, "");
+    const rawBase = baseOf(rawId);
     for (const assetId of this.assets.keys()) {
-      const baseId = assetId.replace("_otc", "").replace("_", "");
-      const rawBase = id.replace("_otc", "").replace("_", "");
-      if (baseId === rawBase || baseId.includes(rawBase)) {
-        return assetId;
-      }
+      if (baseOf(assetId) === rawBase) return assetId;
     }
-    
+
+    // Unknown asset — return the normalized raw id (caller will no-op on miss).
     return rawId;
   }
 
   private updateCandles(asset: AssetInfo, price: number, timestamp: number): void {
-    const minuteMs = 60000;
-    const candleTime = Math.floor(timestamp / minuteMs) * minuteMs;
-    
-    let candle = asset.candles.find(c => c.openTime === candleTime);
-    
+    const periodMs = (this.config.candlePeriod || 60) * 1000;
+    const candleTime = Math.floor(timestamp / periodMs) * periodMs;
+
+    // Replace a stale in-progress candle if the last candle is no longer the
+    // current bucket (e.g. after a gap in ticks). `find` is fine for the small
+    // capped candle array, but checking the tail first avoids an O(n) scan.
+    let candle = asset.candles.length > 0 && asset.candles[asset.candles.length - 1].openTime === candleTime
+      ? asset.candles[asset.candles.length - 1]
+      : asset.candles.find(c => c.openTime === candleTime);
+
     if (!candle) {
       const newCandle: Candle = {
         assetId: asset.id,
@@ -537,11 +550,11 @@ export class PocketOptionPriceBot {
         close: price,
         volume: 1,
         openTime: candleTime,
-        closeTime: candleTime + minuteMs - 1
+        closeTime: candleTime + periodMs - 1
       };
       asset.candles.push(newCandle);
       if (asset.candles.length > 100) asset.candles.shift();
-      
+
       // Emit new candle
       this.candleListeners.forEach(cb => cb(newCandle));
     } else {
@@ -587,10 +600,17 @@ export class PocketOptionPriceBot {
     const asset = this.assets.get(assetId);
     if (!asset) return;
 
+    // Build a set of already-known openTimes so a reconnect (which re-sends
+    // history) does NOT append duplicate candles. Without this, every reconnect
+    // corrupts the candle array (and thus structure/regime/HTF calculations).
+    const known = new Set(asset.candles.map(c => c.openTime));
+
     for (const c of candles) {
       if (!Array.isArray(c) || c.length < 5) continue;
       const time = Number(c[0]) * 1000;
       const period = this.config.candlePeriod ? this.config.candlePeriod * 1000 : 60000;
+      // Skip duplicates of candles we already have.
+      if (known.has(time)) continue;
       const candle: Candle = {
         assetId: assetId,
         open: Number(c[1]),
@@ -602,9 +622,11 @@ export class PocketOptionPriceBot {
         closeTime: time + period - 1
       };
       asset.candles.push(candle);
+      known.add(time);
     }
 
-    // Trim to last 100 candles
+    // Keep candles sorted by openTime and trim to the last 100.
+    asset.candles.sort((a, b) => a.openTime - b.openTime);
     if (asset.candles.length > 100) {
       asset.candles = asset.candles.slice(-100);
     }
@@ -648,10 +670,11 @@ export class PocketOptionPriceBot {
 
   private subscribeAsset(assetId: string): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    
-    // Subscribe to 1-minute candles for asset
-    this.ws.send(`42["changeSymbol",{"asset":"${assetId}","period":60}]`);
-    this.log(`[WS] Subscribed to: ${assetId}`);
+
+    const period = this.config.subscribePeriod ?? this.config.candlePeriod ?? 60;
+    // Subscribe to candles for asset at the configured period (matches candlePeriod).
+    this.ws.send(`42["changeSymbol",{"asset":"${assetId}","period":${period}}]`);
+    this.log(`[WS] Subscribed to: ${assetId} (period ${period}s)`);
   }
 
   private subscribeAllAssets(): void {
@@ -716,6 +739,28 @@ export class PocketOptionPriceBot {
 
   public isConnected(): boolean {
     return this.connected;
+  }
+
+  /**
+   * Best-effort estimate of Pocket Option's SERVER clock (ms). Candle
+   * openTime/closeTime are derived from tick timestamps which carry the
+   * server clock, which is ~2h ahead of the container's Date.now() on this
+   * host. Signal timing (time-remaining-in-candle, entry quality) MUST use
+   * the server clock, not Date.now(), or it will be wrong by the skew.
+   *
+   * Falls back to Date.now() only when no candles are available yet.
+   */
+  public getServerTime(): number {
+    for (const asset of this.assets.values()) {
+      if (asset.candles.length > 0) {
+        const last = asset.candles[asset.candles.length - 1];
+        // The in-progress candle's closeTime is its bucket end; combine with
+        // lastTickTime (a server-clock ms) to stay inside the current bucket.
+        const t = asset.lastTickTime > 0 ? asset.lastTickTime : last.closeTime;
+        return t;
+      }
+    }
+    return Date.now();
   }
 
   public onTick(callback: (tick: Tick) => void): void {
