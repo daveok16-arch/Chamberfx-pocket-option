@@ -20,8 +20,9 @@ using only leading methods (no EMA/RSI/MACD/Bollinger).
   tiny HTTP `/health` server (for Render) and delivers signals to Telegram.
 - `price-bot/telegram.ts` -- optional Telegram notifier (no extra deps, uses
   Node fetch). Reads `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`; disables itself
-  (warns, does NOT crash) if unset. `signal-bot.ts` delivers every emitted
-  signal there + a startup confirmation + a ~5min price heartbeat.
+  (warns, does NOT crash) if unset. `signal-bot.ts` delivers ONLY trade signals
+  (CALL/PUT) to Telegram — no startup confirmation or periodic heartbeat (those
+  were spammy); the `/health` HTTP endpoint covers liveness for Render.
 
 ## Deployment (Render.com)
 - `Dockerfile` (repo ROOT, not price-bot/) -- Render clones the repo root, so the

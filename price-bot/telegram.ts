@@ -155,19 +155,6 @@ export class TelegramNotifier {
 
     return this.send(lines.join('\n'));
   }
-
-  /** Startup/connectivity confirmation. */
-  async sendStartup(): Promise<boolean> {
-    return this.send('✅ <b>Pocket Option OTC Signal Bot</b> is online (v3 quality engine).\nLive capture + leading signal engine active. High-confidence, trend-aligned signals only — fewer but better. Signals will be delivered here.');
-  }
-
-  /** Periodic heartbeat with live prices. */
-  async sendHeartbeat(prices: Map<string, number>, candleCounts: Map<string, number>): Promise<boolean> {
-    const priceList = Array.from(prices.entries())
-      .map(([a, p]) => `  ${a.replace('_otc', '')}: ${p.toFixed(5)} (${candleCounts.get(a) ?? 0} candles)`)
-      .join('\n');
-    return this.send(`🔔 <b>Heartbeat</b>\n📊 <b>Live prices:</b>\n${priceList}\n🕐 ${new Date().toISOString().replace('T', ' ').slice(0, 19)} UTC`);
-  }
 }
 
 function fmt(n: number): string {

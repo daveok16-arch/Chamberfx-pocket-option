@@ -134,9 +134,8 @@ async function main() {
 
   bot.onConnect(() => {
     console.log('✅ Connected to Pocket Option — live signal generation active\n');
-    // Confirm to Telegram that the bot is live (only if enabled)
-    void telegram.sendStartup();
-    // Validate Telegram config (token + chat id) — logs precise errors, never throws
+    // Validate Telegram config (token + chat id) — logs precise errors, never throws.
+    // Only trade signals are delivered to Telegram (no startup/heartbeat spam).
     void telegram.validate();
   });
   bot.onDisconnect(() => {
@@ -202,7 +201,6 @@ async function main() {
   // --- Status printer: shows the engine is alive and receiving data ---
   let tickCount = 0;
   bot.onTick(() => { tickCount++; });
-  let statusCounter = 0;
   const statusTimer = setInterval(() => {
     const assets = bot.getAssetList();
     const candleTotals = assets.map(a => `${a.id.split('_')[0]}:${a.candles.length}`).join(' ');
@@ -230,21 +228,6 @@ async function main() {
         best ? `${best.id.split('_')[0]} ${best.dir}/${best.conf}% [${best.comp}]` : 'n/a'
       } lastSig=[${lastSignals || 'none'}]`
     );
-
-    // Telegram heartbeat every ~5 min (20 * 15s) — only if enabled & connected
-    statusCounter++;
-    if (telegram.isEnabled() && statusCounter % 20 === 0) {
-      const prices = new Map<string, number>();
-      const candleCounts = new Map<string, number>();
-      for (const a of assets) {
-        const p = bot.getPrice(a.id);
-        if (p > 0) {
-          prices.set(a.id, p);
-          candleCounts.set(a.id, a.candles.length);
-        }
-      }
-      if (prices.size > 0) void telegram.sendHeartbeat(prices, candleCounts);
-    }
   }, 15000);
 
   // Graceful shutdown
