@@ -5,6 +5,9 @@
 # generates leading-indicator CALL/PUT signals, and delivers them to Telegram.
 # A small HTTP server on PORT answers /health for Render's health checks.
 #
+# The Dockerfile lives at the REPO ROOT (not price-bot/) so Render — which
+# clones the repo root — finds it directly. The app source is price-bot/.
+#
 # Apply: render blueprint deploy (Render dashboard) or `render blueprint apply`.
 # Required env vars (set as Render secret env vars, NOT committed):
 #   TELEGRAM_BOT_TOKEN  — Bot token from @BotFather
@@ -19,9 +22,6 @@ services:
     env: docker
     region: oregon
     plan: starter            # Playwright/chromium needs ~1GB; bump to standard if OOM
-    rootDirectory: price-bot
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
     healthCheckPath: /health
     autoDeploy: true
     envVars:

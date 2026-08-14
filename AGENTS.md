@@ -6,59 +6,48 @@ for 1/3/5-minute binary-option expiries. Predicts the next candlestick direction
 using only leading methods (no EMA/RSI/MACD/Bollinger).
 
 ## Architecture
-- `price-bot/server.ts` â€” verified live price-capture engine.
+- `price-bot/server.ts` -- verified live price-capture engine.
   Playwright discovers the Pocket Option Socket.IO WS, captures the auth packet,
   subscribes to OTC assets, and streams ticks + builds candles.
   Exports `PocketOptionPriceBot` with multi-listener callbacks (onTick/onCandle/...).
   `getCandles(assetId)`, `getPrice(assetId)`, `getAssetList()` for consumers.
-- `price-bot/signal.ts` â€” `SignalEngine` class. Four leading components fused by
+- `price-bot/signal.ts` -- `SignalEngine` class. Four leading components fused by
   weighted confluence: (A) tick Order-Flow Imbalance, (B) candle anatomy/rejection
   (wicks, engulfing, marubozu), (C) tick velocity + momentum decay (exhaustion),
   (D) market structure (HH/HL, LH/LL). Emits CALL/PUT/WAIT with confidence + reasons.
-- `price-bot/signal-bot.ts` â€” CLI wiring capture -> signal engine. Args:
-  `--expiry 1|3|5`, `--confidence N`. Logs signals to `signals.jsonl`.
-- `price-bot/telegram.ts` â€” optional Telegram notifier (no extra deps, uses
+- `price-bot/signal-bot.ts` -- CLI wiring capture -> signal engine. Args:
+  `--expiry 1|3|5`, `--confidence N`. Logs signals to `signals.jsonl`. Also runs a
+  tiny HTTP `/health` server (for Render) and delivers signals to Telegram.
+- `price-bot/telegram.ts` -- optional Telegram notifier (no extra deps, uses
   Node fetch). Reads `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`; disables itself
   (warns, does NOT crash) if unset. `signal-bot.ts` delivers every emitted
   signal there + a startup confirmation + a ~5min price heartbeat.
 
 ## Deployment (Render.com)
-- `price-bot/Dockerfile` — image based on `mcr.microsoft.com/playwright`
-  (Node + chromium). Installs deps, `playwright install chromium`, runs
-  `tsx signal-bot.ts --expiry 1 --confidence 50`. Exposes port 10000.
-- `render.yaml` (repo root) — Render blueprint: `web` service, `env: docker`,
-  `rootDirectory: price-bot`, `healthCheckPath: /health`, plan `starter`
-  (bump to standard if chromium OOMs). Secret env vars `TELEGRAM_BOT_TOKEN` +
-  `TELEGRAM_CHAT_ID` are `sync: false` (set in dashboard, never in repo).
+- `Dockerfile` (repo ROOT, not price-bot/) -- Render clones the repo root, so the
+  Dockerfile must be at root to be found. It `COPY price-bot/` into the image.
+  Base `mcr.microsoft.com/playwright` (Node + chromium) for session discovery.
+  Installs deps + `playwright install chromium`, runs
+  `tsx signal-bot.ts --expiry 1 --confidence 50`. Exposes port 10000, HEALTHCHECK
+  on `/health`.
+- `.dockerignore` (root) -- excludes `**/node_modules`, logs, runtime JSON, .env.
+- `render.yaml` (root) -- Render blueprint: `web` service, `env: docker` (no
+  `rootDirectory` -- Dockerfile is at repo root), `healthCheckPath: /health`,
+  plan `starter` (bump to standard if chromium OOMs). Secret env vars
+  `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` are `sync: false`.
 - `signal-bot.ts` runs a tiny HTTP server on `PORT` (default 10000) serving
   `/health` (JSON status: uptime, prices, asset count, telegram on/off) so
   Render's health check passes. Closed on SIGINT.
 - `package.json` `postinstall` runs `playwright install chromium --with-deps`
   for non-Docker Render runtimes; `render:start` script available.
 - If Telegram env vars are unset the bot runs fine (logs to console +
-  signals.jsonl) — it does NOT crash.
-
-## Deployment (Render.com)
-- `price-bot/Dockerfile` — image based on `mcr.microsoft.com/playwright`
-  (Node + chromium). Installs deps, `playwright install chromium`, runs
-  `tsx signal-bot.ts --expiry 1 --confidence 50`. Exposes port 10000.
-- `render.yaml` (repo root) — Render blueprint: `web` service, `env: docker`,
-  `rootDirectory: price-bot`, `healthCheckPath: /health`, plan `starter`
-  (bump to standard if chromium OOMs). Secret env vars `TELEGRAM_BOT_TOKEN` +
-  `TELEGRAM_CHAT_ID` are `sync: false` (set in dashboard, never in repo).
-- `signal-bot.ts` runs a tiny HTTP server on `PORT` (default 10000) serving
-  `/health` (JSON status: uptime, prices, asset count, telegram on/off) so
-  Render's health check passes. Closed on SIGINT.
-- `package.json` `postinstall` runs `playwright install chromium --with-deps`
-  for non-Docker Render runtimes; `render:start` script available.
-- If Telegram env vars are unset the bot runs fine (logs to console +
-  signals.jsonl) — it does NOT crash.
+  signals.jsonl) -- it does NOT crash.
 
 ## Build / Run
 ```
 cd price-bot
 npx tsc --noEmit -p tsconfig.json     # typecheck (must be exit 0)
-npx tsx signal-bot.ts --expiry 1 --confidence 68
+npx tsx signal-bot.ts --expiry 1 --confidence 50
 ```
 Playwright Chromium must be installed (`npx playwright install chromium`).
 
@@ -77,18 +66,18 @@ Playwright Chromium must be installed (`npx playwright install chromium`).
 - server.ts callbacks refactored to multi-listener arrays.
 - server.ts main() guarded to run only when executed directly.
 
-## Signal Engine v2 â€” Regime-Adaptive (2026-08-13)
+## Signal Engine v2 -- Regime-Adaptive (2026-08-13)
 The v1 engine was ANTI-predictive (29.4% on 1m) because it treated every bullish
 anatomy/OFI/momentum reading as a CALL (continuation), but on short-timeframe OTC
 the next candle predominantly REVERSES the prior candle. v2 fixes this with a
 regime layer:
 
-- `computeRegime(candles)` â€” lag-1 return autocorrelation over recent closed
+- `computeRegime(candles)` -- lag-1 return autocorrelation over recent closed
   candles. `<0` = MEAN_REVERT, `>0` = TREND, `|r|<minRegimeStrength` = UNCLEAR.
 - Continuation components (OFI, body/marubozu conviction, momentum velocity,
   structure) are FLIPPED (sign x -1) in MEAN_REVERT + UNCLEAR (OTC default is
   mean-reversion, so UNCLEAR also fades). Kept as-is in TREND.
-- Reversal components (rejection wicks + engulfing) are NEVER flipped â€” they
+- Reversal components (rejection wicks + engulfing) are NEVER flipped -- they
   already predict the opposite of the rejected extreme. This was the critical
   v1 bug: flipping rejection wicks inverted genuinely predictive signals.
 - `computeCandleAnatomy` now returns separate `reversal` + `continuation` scores
@@ -98,28 +87,28 @@ regime layer:
 - `SignalComponents` gained `regime` + `regimeStrength` fields (shown in
   signal-bot.ts + accuracy-test.ts output and the per-regime report breakdown).
 
-CONFIG: `minRegimeStrength: 0.10` (commit to a regime at |autocorr|â‰¥0.10).
+CONFIG: `minRegimeStrength: 0.10` (commit to a regime at |autocorr|>=0.10).
 
-## Accuracy Validation â€” v2 (live, 2026-08-13)
+## Accuracy Validation -- v2 (live, 2026-08-13)
 1m run (n=37 decided, 18-min live): **51.4% overall** (was 29.4% in v1). The
-confidence filter now CORRELATES with accuracy â€” the key profit lever:
+confidence filter now CORRELATES with accuracy -- the key profit lever:
 ```
   By confidence tier:  ALL 51.4% | >=50 64.7% (11/17) | >=60 66.7% (2/3) | >=68 100% (1/1)
   By asset:   XAUUSD 75% (was 0%) | GBPUSD/USDJPY/USDCAD 50% | EURUSD 33% | AUDUSD 43%
   By direction: CALL 57.1% | PUT 47.8%
   By regime:   TREND 72.7% (8/11) | MEAN_REVERT 40.0% (10/25) | UNCLEAR 100% (1/1)
 ```
-**Recommendation: trade ONLY >=50 confidence signals â†’ 64.7% win rate, above the
+**Recommendation: trade ONLY >=50 confidence signals -> 64.7% win rate, above the
 ~53% break-even for ~92% OTC payout.** Run `signal-bot.ts --confidence 50`.
 
 Per-regime insight: the mean-revert FLIP of continuation components underperforms
-(40%) in the detected MEAN_REVERT regime â€” the lag-1 autocorrelation is itself a
+(40%) in the detected MEAN_REVERT regime -- the lag-1 autocorrelation is itself a
 lagging aggregate, so by the time it reads "mean revert" the regime is often
 shifting. The genuinely predictive part is the NEVER-FLIPPED reversal anchor
 (rejection wicks + engulfing) plus continuation-kept-in-TREND. Next refinement:
 weight the reversal anchor higher and reduce the continuation-flip magnitude.
 
-5m run (v2, n=16 decided, 40-min live): **56.3% overall** (was 27.3% in v1) â€”
+5m run (v2, n=16 decided, 40-min live): **56.3% overall** (was 27.3% in v1) --
 above break-even. CALL 55.6% / PUT 57.1% (balanced, unlike v1's CALL collapse).
 USDJPY 100% (2/2), EURUSD 75% (3/4), AUDUSD 66.7%. Same regime pattern: TREND
 62.5% (5/8) > MEAN_REVERT 33.3% (2/6) > UNCLEAR 100% (2/2).

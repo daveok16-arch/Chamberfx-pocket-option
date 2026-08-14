@@ -78,11 +78,11 @@ This repo is configured for Render via the `render.yaml` blueprint and a Dockerf
 3. Set the two **secret** env vars in the Render dashboard (they are marked `sync: false` so they are never read from the repo):
    - `TELEGRAM_BOT_TOKEN` — from `@BotFather`
    - `TELEGRAM_CHAT_ID` — your chat/channel id (get it from `@userinfobot`)
-4. Deploy. Render builds the Docker image (`price-bot/Dockerfile`), installs Playwright/chromium, and starts the bot. Health checks hit `/health` on port `10000`.
+4. Deploy. Render builds the Docker image (root `./Dockerfile`, app in `price-bot/`), installs Playwright/chromium, and starts the bot. Health checks hit `/health` on port `10000`.
 
 ### Option B — Manual web service
 1. **New → Web Service** → connect the repo.
-2. **Runtime:** Docker. **Root Directory:** `price-bot`. **Dockerfile path:** `./Dockerfile`.
+2. **Runtime:** Docker. (Leave **Root Directory** empty — the Dockerfile is at the repo root.) **Dockerfile path:** `./Dockerfile`.
 3. **Instance plan:** `starter` or higher (Playwright/chromium needs ~1GB RAM — bump to `standard` if you see OOM).
 4. Add the env vars above. Deploy.
 
