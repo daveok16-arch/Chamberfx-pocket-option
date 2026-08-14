@@ -268,7 +268,6 @@ function printSignal(s: Signal): void {
   console.log(`  Entry Price:   ${s.entryPrice.toFixed(5)}`);
   console.log(`  Confidence:    ${s.confidence}%`);
   console.log(`  Expiry:         ${s.expiryMinutes}m`);
-  console.log(`  Time Left:      ${s.timeRemainingSec}s (${s.entryQuality})`);
   console.log(`  Time:           ${time}`);
   console.log('  -----------------------------------------');
   console.log('  Components (leading, non-lagging):');

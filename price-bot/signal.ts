@@ -53,9 +53,9 @@ export interface Signal {
   confidence: number;          // 0-100
   entryPrice: number;
   payout: number;              // broker payout fraction 0..1 (e.g. 0.92)
-  expiryMinutes: ExpiryMinutes;
-  timeRemainingSec: number;    // seconds left in the current candle
-  entryQuality: 'EXCELLENT' | 'GOOD' | 'FAIR' | 'POOR';
+  expiryMinutes: ExpiryMinutes;  // trade duration in minutes (1, 3, or 5)
+  timeRemainingSec: number;    // internal: seconds left in current candle (timing gate; NOT displayed)
+  entryQuality: 'EXCELLENT' | 'GOOD' | 'FAIR' | 'POOR';  // internal timing gate
   reasons: string[];
   components: SignalComponents;
   timestamp: number;           // ms
@@ -386,8 +386,18 @@ export class SignalEngine {
     if (confidence < cfg.minConfidence) {
       return signal;
     }
-    if (entryQuality === 'POOR') {
-      return signal; // too late in the candle to act reliably
+    // --- Timing gate: emit only early in the candle so the trade aligns ---
+    // A binary-option trade of `expiryMinutes` is entered when the signal
+    // arrives. If we emit LATE in a candle (e.g. 11s before it closes), the
+    // 1-minute trade straddles two candles — the prediction (which targets the
+    // NEXT candle) no longer matches what the user actually trades. So we only
+    // emit while enough of the current candle remains (GOOD or EXCELLENT),
+    // i.e. the trade lines up with a single candle. The onCandle-close hook
+    // fires right at a new candle open (full period remaining) — the ideal
+    // entry point — and the 15s periodic eval is blocked once the candle is
+    // past its first ~30%.
+    if (entryQuality === 'POOR' || entryQuality === 'FAIR') {
+      return signal;
     }
     // v3: skip low-volatility candles (no edge in a random walk)
     if (rangeRatio < cfg.minRangeRatio) {
@@ -841,9 +851,11 @@ export class SignalEngine {
   ): 'EXCELLENT' | 'GOOD' | 'FAIR' | 'POOR' {
     const periodSec = expiryMin * 60;
     const ratio = timeRemainingSec / periodSec;
-    // We want to enter early in the NEW candle; but evaluation happens at the
-    // end of the current candle. Practically, more time remaining in the
-    // current candle = the signal is forming ahead of the next candle close.
+    // The trade is entered when the signal arrives and lasts `expiryMin`. To
+    // keep the trade aligned with a single candle we want to enter EARLY in the
+    // current candle (lots of time remaining = the full trade fits inside it).
+    // Late in the candle (little time remaining) = the trade straddles into the
+    // next candle = misaligned → FAIR/POOR, which the emit gate suppresses.
     if (ratio >= 0.5) return 'EXCELLENT';
     if (ratio >= 0.3) return 'GOOD';
     if (ratio >= 0.15) return 'FAIR';

@@ -82,7 +82,7 @@ console.log('[1] Bullish trend → CALL signal');
   const engine = new SignalEngine({ expiryMinutes: 1, minConfidence: 0, cooldownMs: 0 });
   const candles = makeCandles(10, 1); // 10 strong up candles
   feedTicks(engine, candles);
-  const now = candles[9].closeTime; // server-clock time inside the current candle
+  const now = candles[9].openTime + 5000; // 5s into the current candle (GOOD timing window)
   const sig = engine.evaluate(ASSET, candles, candles[9].close, now, 0.92);
   console.log(`    direction=${sig.direction} confidence=${sig.confidence} agreeing=${sig.components.agreeing} regime=${sig.components.regime} htf=${sig.components.htfTrend}`);
   assert(sig.direction === 'CALL', `expected CALL, got ${sig.direction}`);
@@ -98,7 +98,7 @@ console.log('\n[2] Bearish trend → PUT signal');
   const engine = new SignalEngine({ expiryMinutes: 1, minConfidence: 0, cooldownMs: 0 });
   const candles = makeCandles(10, -1); // 10 strong down candles
   feedTicksDown(engine, candles);
-  const now = candles[9].closeTime;
+  const now = candles[9].openTime + 5000; // early in the candle (timing gate open)
   const sig = engine.evaluate(ASSET, candles, candles[9].close, now, 0.92);
   console.log(`    direction=${sig.direction} confidence=${sig.confidence} agreeing=${sig.components.agreeing} regime=${sig.components.regime} htf=${sig.components.htfTrend}`);
   assert(sig.direction === 'PUT', `expected PUT, got ${sig.direction}`);

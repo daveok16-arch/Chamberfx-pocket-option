@@ -140,7 +140,7 @@ export class TelegramNotifier {
     lines.push('');
     lines.push(`💰 <b>Entry:</b> <code>${s.entryPrice.toFixed(5)}</code>`);
     lines.push(`🎯 <b>Confidence:</b> <b>${s.confidence}%</b>`);
-    lines.push(`⏱ <b>Expiry:</b> ${s.expiryMinutes}m  (${s.timeRemainingSec}s left, ${s.entryQuality})`);
+    lines.push(`⏱ <b>Expiry:</b> ${s.expiryMinutes}m`);
     lines.push('');
     lines.push('🧩 <b>Leading components:</b>');
     lines.push(`  • OFI: <code>${fmt(c.ofi)}</code>  • Candle: <code>${fmt(c.candleSignal)}</code> [${esc(c.candlePattern)}]`);
