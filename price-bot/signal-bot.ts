@@ -26,6 +26,7 @@ import { PocketOptionPriceBot } from './server.js';
 import { SignalEngine, type ExpiryMinutes, type Signal } from './signal.js';
 import { telegram } from './telegram.js';
 import * as fs from 'fs';
+import * as http from 'http';
 
 // ============================================
 // CLI ARGS
@@ -140,6 +141,39 @@ async function main() {
 
   await bot.connect();
 
+  // --- Health HTTP server (for Render.com / platform health checks) ---
+  // Render web services expect a responding HTTP port. We expose a tiny server
+  // returning current bot status. PORT defaults to 10000 (Render convention).
+  const PORT = Number(process.env.PORT) || 10000;
+  const healthServer = http.createServer((req, res) => {
+    if (req.url === '/health' || req.url === '/') {
+      const assetList = bot.getAssetList();
+      const prices = new Map<string, number>();
+      for (const a of assetList) {
+        const p = bot.getPrice(a.id);
+        if (p > 0) prices.set(a.id, p);
+      }
+      const lastSignals = assetList.map(a => engine.getLastSignal(a.id)).filter(Boolean) as Signal[];
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status: 'ok',
+        uptime: process.uptime(),
+        connected: true,
+        assets: prices.size,
+        prices: Object.fromEntries(prices),
+        recentSignals: lastSignals.length,
+        expiry: `${expiry}m`,
+        telegram: telegram.isEnabled(),
+        timestamp: Date.now(),
+      }));
+    } else {
+      res.writeHead(404); res.end('not found');
+    }
+  });
+  healthServer.listen(PORT, () => {
+    console.log(`🩺 Health server listening on :${PORT} (/health)`);
+  });
+
   // --- Status printer: shows the engine is alive and receiving data ---
   let tickCount = 0;
   bot.onTick(() => { tickCount++; });
@@ -192,6 +226,7 @@ async function main() {
     console.log('\n\nShutting down...');
     clearInterval(evalTimer);
     clearInterval(statusTimer);
+    healthServer.close();
     bot.disconnect();
     console.log(`Signals logged to ${logPath}`);
     process.exit(0);
