@@ -34,6 +34,10 @@ import { ExecutionEngine } from './execution.js';
 // CLI ARGS
 // ============================================
 
+/**
+ * Parse command-line arguments and environment variables for bot configuration.
+ * @returns Configuration object with candle period (60/180/300 seconds) and asset list
+ */
 function parseArgs(): { candlePeriod: number; assets: string[] } {
   const args = process.argv.slice(2);
   const assets = [
@@ -65,6 +69,11 @@ function parseArgs(): { candlePeriod: number; assets: string[] } {
 /**
  * Run one decision cycle for an asset: ask the strategy for a proposal, gate
  * it through the risk layer, then (if allowed) submit it to the executor.
+ * @param bot - Price bot instance providing market data
+ * @param strategy - Strategy instance that proposes trades
+ * @param risk - Risk manager that gates trades through safety checks
+ * @param executor - Execution engine that submits approved trades
+ * @param asset - Asset identifier to evaluate
  */
 async function evaluateAsset(
   bot: PocketOptionPriceBot,
@@ -118,6 +127,10 @@ async function evaluateAsset(
 // MAIN
 // ============================================
 
+/**
+ * Main entry point for the trade bot.
+ * Initializes the strategy/risk/execution pipeline and connects to Pocket Option.
+ */
 async function main() {
   const { candlePeriod, assets } = parseArgs();
 

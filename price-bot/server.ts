@@ -144,11 +144,18 @@ export class PocketOptionPriceBot {
   private disconnectListeners: (() => void)[] = [];
   private errorListeners: ((error: Error) => void)[] = [];
 
+  /**
+   * Create a new Pocket Option price capture bot.
+   * @param config - Configuration options for price capture, connection, and data persistence
+   */
   constructor(config: Partial<PriceCaptureConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.initializeAssets();
   }
 
+  /**
+   * Initialize asset tracking data structures for configured assets.
+   */
   private initializeAssets(): void {
     for (const assetId of this.config.defaultAssets) {
       this.assets.set(assetId, {
@@ -169,6 +176,11 @@ export class PocketOptionPriceBot {
   // SESSION DISCOVERY (Playwright)
   // ============================================
 
+  /**
+   * Discover Pocket Option WebSocket URL and session credentials using Playwright.
+   * Launches a headless browser to capture WebSocket connection details and auth packets.
+   * @returns Session information including WebSocket URL, auth packet, and cookies
+   */
   private async discoverSession(): Promise<{ url: string; authPacket: string; cookies: string }> {
     this.log("[DISCOVERY] Launching headless browser to intercept Pocket Option session...");
     
@@ -256,6 +268,10 @@ export class PocketOptionPriceBot {
   // WEBSOCKET CONNECTION
   // ============================================
 
+  /**
+   * Connect to Pocket Option WebSocket and authenticate the session.
+   * Discovers session credentials if not provided in configuration.
+   */
   public async connect(): Promise<void> {
     try {
       // Discover session if URL not provided
@@ -307,6 +323,9 @@ export class PocketOptionPriceBot {
     }
   }
 
+  /**
+   * Handle WebSocket connection open event.
+   */
   private handleOpen(): void {
     this.log("[WS] Connection opened");
     this.connected = true;
@@ -314,6 +333,10 @@ export class PocketOptionPriceBot {
     this.connectListeners.forEach(cb => cb());
   }
 
+  /**
+   * Handle incoming WebSocket messages and route to appropriate processors.
+   * @param msg - Raw message string from WebSocket
+   */
   private handleMessage(msg: string): void {
     // Socket.IO Heartbeat
     if (msg === "2") {
@@ -391,6 +414,11 @@ export class PocketOptionPriceBot {
     }
   }
   
+  /**
+   * Process binary-encoded Socket.IO events.
+   * @param event - Event name
+   * @param data - Event data payload
+   */
   private processEvent(event: string, data: any): void {
     switch (event) {
       case "updateStream":
@@ -414,6 +442,10 @@ export class PocketOptionPriceBot {
     }
   }
 
+  /**
+   * Process standard Socket.IO events (non-binary).
+   * @param payload - JSON payload string
+   */
   private processSocketIOEvent(payload: string): void {
     try {
       const json = JSON.parse(payload);
@@ -442,6 +474,11 @@ export class PocketOptionPriceBot {
     }
   }
 
+  /**
+   * Process incoming tick (price update) data from the WebSocket stream.
+   * Updates asset prices, builds candles, and notifies tick listeners.
+   * @param data - Array of tick data from updateStream event
+   */
   private processTickData(data: any): void {
     if (!Array.isArray(data)) return;
     
@@ -508,6 +545,12 @@ export class PocketOptionPriceBot {
     }
   }
 
+  /**
+   * Normalize various asset ID formats to a known asset identifier.
+   * Handles case variations, leading '#', and '_otc' suffix differences.
+   * @param rawId - Raw asset identifier from WebSocket data
+   * @returns Normalized asset ID or the raw ID if no match found
+   */
   private normalizeAssetId(rawId: string): string {
     // Normalize various ID formats to a known asset id. Use strict matching to
     // avoid cross-mapping short ids (e.g. "USD") to the wrong asset — only an
@@ -530,6 +573,13 @@ export class PocketOptionPriceBot {
     return rawId;
   }
 
+  /**
+   * Update or create candles from incoming tick data.
+   * Maintains a rolling window of up to 100 candles per asset.
+   * @param asset - Asset info object to update
+   * @param price - Current price from tick
+   * @param timestamp - Tick timestamp in milliseconds
+   */
   private updateCandles(asset: AssetInfo, price: number, timestamp: number): void {
     const periodMs = (this.config.candlePeriod || 60) * 1000;
     const candleTime = Math.floor(timestamp / periodMs) * periodMs;
@@ -565,9 +615,13 @@ export class PocketOptionPriceBot {
     }
   }
 
+  /**
+   * Process asset metadata updates (payout rates, active status).
+   * @param data - Array of asset update data
+   */
   private processAssetsUpdate(data: any): void {
     if (!Array.isArray(data)) return;
-    
+
     for (const item of data) {
       if (Array.isArray(item) && item.length >= 15) {
         const id = String(item[1]);
@@ -587,6 +641,11 @@ export class PocketOptionPriceBot {
     }
   }
 
+  /**
+   * Process historical candle data received on subscription.
+   * Seeds the candle array with historical OHLCV data.
+   * @param data - History data array: [assetId, [[time, open, high, low, close, volume], ...]]
+   */
   private processHistoryData(data: any): void {
     // Pocket Option history event: [assetId, [[time, open, high, low, close, volume], ...]]
     if (!Array.isArray(data) || data.length < 2) return;
@@ -639,11 +698,20 @@ export class PocketOptionPriceBot {
     this.log(`[HISTORY] ${assetId}: loaded ${candles.length} candles (last close: ${asset.lastPrice.toFixed(5)})`);
   }
 
+  /**
+   * Handle WebSocket errors.
+   * @param err - Error object
+   */
   private handleError(err: Error): void {
     this.log(`[WS ERROR] ${err.message}`);
     this.errorListeners.forEach(cb => cb(err));
   }
 
+  /**
+   * Handle WebSocket connection close event.
+   * @param code - WebSocket close code
+   * @param reason - Close reason string
+   */
   private handleClose(code: number, reason: string): void {
     this.log(`[WS] Connection closed (${code}): ${reason}`);
     this.connected = false;
@@ -652,6 +720,9 @@ export class PocketOptionPriceBot {
     this.scheduleReconnect();
   }
 
+  /**
+   * Schedule automatic reconnection with exponential backoff.
+   */
   private scheduleReconnect(): void {
     if (this.reconnectAttempts >= this.config.maxReconnectAttempts) {
       this.log("[WS] Max reconnection attempts reached");
@@ -668,6 +739,10 @@ export class PocketOptionPriceBot {
     }, delay);
   }
 
+  /**
+   * Subscribe to price updates for a specific asset.
+   * @param assetId - Asset identifier to subscribe to
+   */
   private subscribeAsset(assetId: string): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
@@ -677,6 +752,9 @@ export class PocketOptionPriceBot {
     this.log(`[WS] Subscribed to: ${assetId} (period ${period}s)`);
   }
 
+  /**
+   * Subscribe to all active tracked assets with staggered timing.
+   */
   private subscribeAllAssets(): void {
     const activeAssets = Array.from(this.assets.values()).filter(a => a.active);
     this.log(`[WS] Subscribing to ${activeAssets.length} assets...`);
@@ -692,6 +770,9 @@ export class PocketOptionPriceBot {
   // PUBLIC API
   // ============================================
 
+  /**
+   * Disconnect from the WebSocket and clean up resources.
+   */
   public disconnect(): void {
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
@@ -709,10 +790,19 @@ export class PocketOptionPriceBot {
     this.isAuthenticated = false;
   }
 
+  /**
+   * Get the current price for a specific asset.
+   * @param assetId - Asset identifier
+   * @returns Current price or 0 if not available
+   */
   public getPrice(assetId: string): number {
     return this.assets.get(assetId)?.lastPrice || 0;
   }
 
+  /**
+   * Get current prices for all tracked assets.
+   * @returns Map of asset IDs to current prices
+   */
   public getPrices(): Map<string, number> {
     const prices = new Map<string, number>();
     for (const [id, asset] of this.assets) {
@@ -721,22 +811,45 @@ export class PocketOptionPriceBot {
     return prices;
   }
 
+  /**
+   * Get recent tick prices for a specific asset (up to 100 most recent).
+   * @param assetId - Asset identifier
+   * @returns Array of recent tick prices
+   */
   public getTicks(assetId: string): number[] {
     return this.assets.get(assetId)?.ticks || [];
   }
 
+  /**
+   * Get historical candles for a specific asset (up to 100 most recent).
+   * @param assetId - Asset identifier
+   * @returns Array of candles sorted by time
+   */
   public getCandles(assetId: string): Candle[] {
     return this.assets.get(assetId)?.candles || [];
   }
 
+  /**
+   * Get full tick history for a specific asset (up to 1000 most recent).
+   * @param assetId - Asset identifier
+   * @returns Array of tick objects with price, timestamp, and direction
+   */
   public getTickHistory(assetId: string): Tick[] {
     return this.priceHistory.get(assetId) || [];
   }
 
+  /**
+   * Get information for all tracked assets.
+   * @returns Array of asset info objects
+   */
   public getAssetList(): AssetInfo[] {
     return Array.from(this.assets.values());
   }
 
+  /**
+   * Check if the WebSocket is currently connected.
+   * @returns True if connected
+   */
   public isConnected(): boolean {
     return this.connected;
   }
@@ -795,26 +908,49 @@ export class PocketOptionPriceBot {
     return Date.now();
   }
 
+  /**
+   * Register a callback for tick (price update) events.
+   * @param callback - Function to call when a tick is received
+   */
   public onTick(callback: (tick: Tick) => void): void {
     this.tickListeners.push(callback);
   }
 
+  /**
+   * Register a callback for candle close events.
+   * @param callback - Function to call when a candle closes
+   */
   public onCandle(callback: (candle: Candle) => void): void {
     this.candleListeners.push(callback);
   }
 
+  /**
+   * Register a callback for connection events.
+   * @param callback - Function to call when connected
+   */
   public onConnect(callback: () => void): void {
     this.connectListeners.push(callback);
   }
 
+  /**
+   * Register a callback for disconnection events.
+   * @param callback - Function to call when disconnected
+   */
   public onDisconnect(callback: () => void): void {
     this.disconnectListeners.push(callback);
   }
 
+  /**
+   * Register a callback for error events.
+   * @param callback - Function to call when an error occurs
+   */
   public onError(callback: (error: Error) => void): void {
     this.errorListeners.push(callback);
   }
 
+  /**
+   * Save current prices and asset information to a JSON file.
+   */
   public savePricesToFile(): void {
     const data: any = {
       timestamp: new Date().toISOString(),
@@ -833,6 +969,10 @@ export class PocketOptionPriceBot {
     this.log(`[SAVE] Prices saved to ${this.config.outputFile}`);
   }
 
+  /**
+   * Log a message with timestamp.
+   * @param msg - Message to log
+   */
   private log(msg: string): void {
     const timestamp = new Date().toISOString().split("T")[1].slice(0, 8);
     console.log(`[${timestamp}] ${msg}`);
@@ -843,6 +983,10 @@ export class PocketOptionPriceBot {
 // CLI INTERFACE
 // ============================================
 
+/**
+ * Main entry point when running server.ts directly.
+ * Starts price capture with default configuration and event logging.
+ */
 async function main() {
   console.log("\n===========================================");
   console.log("  Pocket Option Live Price Capture Bot v1.0");

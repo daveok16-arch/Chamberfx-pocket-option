@@ -43,6 +43,10 @@ export class RiskManager {
   private settlements: { amount: number; pnl: number; at: number }[] = [];
   private lastTradeAt = new Map<string, number>();
 
+  /**
+   * Create a new risk manager with safety gates.
+   * @param cfg - Risk configuration with stake caps, cooldowns, loss limits, and concurrency limits
+   */
   constructor(cfg: Partial<RiskConfig> = {}) {
     this.cfg = {
       maxAmountPerTrade: cfg.maxAmountPerTrade ?? 5,
@@ -54,11 +58,18 @@ export class RiskManager {
     };
   }
 
-  /** A trade is only "executable live" when the risk layer was armed live. */
+  /**
+   * A trade is only "executable live" when the risk layer was armed live.
+   * @returns True if the risk manager is in live (real money) mode
+   */
   isLive(): boolean {
     return this.cfg.live;
   }
 
+  /**
+   * Check if the risk manager is in paper (simulated) trading mode.
+   * @returns True if the risk manager is in paper mode
+   */
   isPaper(): boolean {
     return !this.cfg.live;
   }
@@ -108,7 +119,13 @@ export class RiskManager {
     return { allowed: true, reason: 'ok', maxAmount };
   }
 
-  /** Record that a trade was placed (opens a position for the concurrency cap). */
+  /**
+   * Record that a trade was placed (opens a position for the concurrency cap).
+   * @param requestId - Unique identifier for the trade
+   * @param asset - Asset identifier
+   * @param amount - Trade amount in account currency
+   * @param nowMs - Current timestamp in milliseconds
+   */
   registerOpen(requestId: string, asset: string, amount: number, nowMs: number): void {
     this.open.push({ requestId, asset, amount, openedAt: nowMs });
     this.lastTradeAt.set(asset, nowMs);
@@ -116,7 +133,12 @@ export class RiskManager {
     this.settlements = this.settlements.filter(s => s.at >= nowMs - 86_400_000);
   }
 
-  /** Settle a position with its PnL (±amount). Releases the concurrency slot. */
+  /**
+   * Settle a position with its PnL (±amount). Releases the concurrency slot.
+   * @param requestId - Unique identifier for the trade to settle
+   * @param pnl - Profit/loss amount (positive for profit, negative for loss)
+   * @param nowMs - Current timestamp in milliseconds
+   */
   settle(requestId: string, pnl: number, nowMs: number): void {
     const idx = this.open.findIndex(o => o.requestId === requestId);
     if (idx === -1) return;

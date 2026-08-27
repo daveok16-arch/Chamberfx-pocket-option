@@ -9,6 +9,11 @@ import { PocketOptionPriceBot } from './server.js';
 import type { Candle } from './server.js';
 
 let failures = 0;
+/**
+ * Check a test condition and log the result.
+ * @param name - Test case description
+ * @param cond - Condition to check (true = pass, false = fail)
+ */
 function check(name: string, cond: boolean): void {
   console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}`);
   if (!cond) failures++;
@@ -109,6 +114,14 @@ check('live send also requires risk-armed (paper risk blocks live, verified sepa
 // --- Multi-asset reversion strategy logic -----------------------------------
 const strat = new MultiAssetReversionStrategy({ amount: 1, duration: 60 });
 
+/**
+ * Create a test candle with specified OHLC values.
+ * @param o - Open price
+ * @param h - High price
+ * @param l - Low price
+ * @param c - Close price
+ * @returns Candle object for testing
+ */
 function mkCandle(o: number, h: number, l: number, c: number): Candle {
   return { assetId: 'EURUSD_otc', open: o, high: h, low: l, close: c, volume: 1, openTime: 0, closeTime: 0 };
 }

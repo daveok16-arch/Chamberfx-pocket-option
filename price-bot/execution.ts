@@ -60,6 +60,11 @@ export class ExecutionEngine {
   private readonly bot: PocketOptionPriceBot;
   private readonly config: ExecutionConfig;
 
+  /**
+   * Create a new execution engine.
+   * @param bot - The Pocket Option price bot instance with authenticated session
+   * @param config - Execution configuration (defaults to paper trading mode)
+   */
   constructor(bot: PocketOptionPriceBot, config: Partial<ExecutionConfig> = {}) {
     this.bot = bot;
     this.config = {
@@ -69,7 +74,10 @@ export class ExecutionEngine {
     };
   }
 
-  /** True when live (real money) execution is currently armed. */
+  /**
+   * True when live (real money) execution is currently armed.
+   * @returns True if both config.live is enabled and the session is non-demo
+   */
   isLive(): boolean {
     // Even if config.live is true, refuse to arm unless the authenticated
     // session is a real (non-demo) account. The auth packet's isDemo field

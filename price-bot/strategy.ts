@@ -50,6 +50,13 @@ export interface Strategy {
 export class CandleDirectionStrategy implements Strategy {
   readonly name = 'candle-direction';
 
+  /**
+   * Evaluate market conditions and propose a trade direction.
+   * Proposes CALL if the last candle closed above its open, PUT if below.
+   * @param ctx - Strategy context with price, candles, and server time
+   * @param _asset - Asset identifier (unused in this simple strategy)
+   * @returns Trade signal with direction, amount, and duration, or null to wait
+   */
   evaluate(ctx: StrategyContext, _asset: string): StrategySignal | null {
     const last = ctx.candles[ctx.candles.length - 1];
     if (!last || !(ctx.price > 0)) return null;
@@ -108,6 +115,10 @@ export class MultiAssetReversionStrategy implements Strategy {
 
   private readonly cfg: MultiAssetReversionConfig;
 
+  /**
+   * Create a new multi-asset range-reversion strategy.
+   * @param cfg - Strategy configuration with amount, duration, volatility filters, and trend limits
+   */
   constructor(cfg: Partial<MultiAssetReversionConfig> = {}) {
     this.cfg = {
       amount: cfg.amount ?? 1,
@@ -119,6 +130,14 @@ export class MultiAssetReversionStrategy implements Strategy {
     };
   }
 
+  /**
+   * Evaluate market conditions and propose a range-reversion trade.
+   * Looks for rejection candles (long wicks) in ranged markets and fades them.
+   * Filters out low-volatility and strongly trending conditions.
+   * @param ctx - Strategy context with price, candles, and server time
+   * @param _asset - Asset identifier (unused in this implementation)
+   * @returns Trade signal with direction, amount, and duration, or null to wait
+   */
   evaluate(ctx: StrategyContext, _asset: string): StrategySignal | null {
     const candles = ctx.candles;
     if (candles.length < this.cfg.minCandles) return null;
