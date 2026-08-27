@@ -878,12 +878,26 @@ export class PocketOptionPriceBot {
    * Detected from the `isDemo` field in the captured auth packet. Defaults to
    * true when not determinable, so an execution layer is never accidentally
    * aimed at a real account by default.
+   *
+   * NOTE: the `isDemo` key is bare JSON, immediately after `{` or `,` — there
+   * is NO `\b` word boundary at that position in JS regexes (both neighbors are
+   * non-word chars), so a `\b` prefix would make this never match. The
+   * captured auth packet is exactly `42["auth",{...}]`, JSON-ish; we search the
+   * raw string for the key so it works whether quoted with `"` or not.
    */
   public isDemoMode(): boolean {
-    const m = /\b"isDemo"\s*:\s*(\d)/.exec(this.cachedAuthPacket);
-    if (m) return m[1] !== "1" ? false : true;
+    const m = /"isDemo"\s*:\s*(\d)/.exec(this.cachedAuthPacket) ?? /isDemo\s*:\s*(\d)/.exec(this.cachedAuthPacket);
+    if (m) return m[1] === "1";
     // Not found in the auth packet — assume demo as the safe default.
     return true;
+  }
+
+  /**
+   * For testability: expose the captured auth packet so isDemoMode() and
+   * execution gating can be unit-tested without a live WebSocket session.
+   */
+  public setAuthPacketForTest(packet: string): void {
+    this.cachedAuthPacket = packet;
   }
 
   /**
