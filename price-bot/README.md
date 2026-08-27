@@ -1,22 +1,15 @@
-# Pocket Option OTC Signal Bot
+# Pocket Option OTC Trade Bot — Capture Foundation
 
-A signal bot that captures **real-time OTC price data** from Pocket Option and
-predicts the **next candlestick direction** (CALL/PUT/WAIT) using only
-**leading, non-lagging** indicators. Deliberately avoids lagging/smoothing
-indicators (EMA, RSI, MACD, Bollinger Bands) — they confirm moves *after* they
-happen, which is useless when you must predict the *next* candle.
+A TypeScript foundation that captures **real-time OTC price data** from Pocket
+Option over the Socket.IO WebSocket (ticks + candles) and exposes a clean hook
+for implementing trading strategies. The previous signal engine was
+deliberately removed to make room for new strategies.
 
 ## Features
 
 - **Real-time Price Capture**: Live tick data via WebSocket (Socket.IO protocol)
-- **Leading Signal Engine**: Order-flow imbalance, candle anatomy/rejection,
-  tick momentum/decay, and market structure — fused by weighted confluence
-- **Regime-Adaptive**: lag-1 return autocorrelation detects trend vs mean-revert
-  and flips continuation components accordingly (reversal signals never flipped)
-- **Quality Filters (v3)**: higher-timeframe trend alignment, volatility/range
-  gate, 3+ confluence, best-of-per-window, per-asset cooldown, ≥72 confidence
-- **Signal Generation**: CALL/PUT/WAIT signals with confidence + reasons
-- **Telegram Delivery**: optional, formats signals and sends a periodic heartbeat
+- **Candle Building**: Configurable candle period (60/180/300s)
+- **Strategy Hook**: `onTick` / `onCandle` callbacks in `trade-bot.ts`
 - **Auto-Discovery**: Playwright automatically discovers the WebSocket session
 - **Multi-Asset**: Monitor 6 OTC pairs simultaneously
 - **Health Endpoint**: tiny HTTP `/health` server for platform health checks
@@ -26,27 +19,34 @@ happen, which is useless when you must predict the *next* candle.
 ```bash
 npm install
 npx playwright install chromium
-npx tsx signal-bot.ts --expiry 1 --confidence 72
+npx tsx trade-bot.ts            # default 1m candles, PAPER mode
+npx tsx trade-bot.ts --period 300   # 5-minute candles
+npx tsx risk-smoke-test.ts      # verify the safety gates (npm run test:risk)
 ```
 
-## Signal Engine (`signal.ts`)
+> ⚠️ **PAPER mode by default** — the bot records every proposed trade locally
+> and never sends a real order. To arm real-money execution you must run with
+> `ALLOW_LIVE=1` AND have an authenticated non-demo session.
 
-The `SignalEngine` predicts the next candle direction from four leading inputs:
+## Architecture
 
-- **A. Order-Flow Imbalance (OFI)** — net UP/DOWN tick pressure over a rolling
-  window, weighted by each tick's *relative* move (scale-invariant across assets).
-- **B. Candle Anatomy / Rejection** — rejection wicks + engulfing (reversal,
-  never regime-flipped) and marubozu/body conviction (continuation, flipped).
-- **C. Tick Velocity & Momentum Decay** — rate of change + exhaustion detection.
-- **D. Market Structure** — higher-highs/lows vs lower-highs/lows sequence.
+Layered pipeline, wired in `trade-bot.ts`:
 
-A regime layer (lag-1 return autocorrelation) decides whether continuation
-components are flipped (mean-revert) or kept (trend); rejection signals are
-never flipped. v3 adds a higher-timeframe trend filter, a volatility gate, a
-3+ confluence requirement, and a best-of-per-window cap so only high-conviction,
-trend-aligned setups fire. See `AGENTS.md` for the full design + accuracy history.
+- `server.ts` — live price-capture engine (`PocketOptionPriceBot`)
+- `strategy.ts` — decides direction (pluggable `Strategy` interface)
+- `risk.ts` — hard safety gates (`RiskManager`)
+- `execution.ts` — executes `openOrder` over the WS (PAPER by default)
+- `trade-bot.ts` — entrypoint wiring capture → strategy → risk → execution + health
 
-## Supported OTC Pairs
+The active strategy is `MultiAssetReversionStrategy` (multi-asset, small-stake
+range-reversion using the volatility filter + rejection-wick anatomy; skips
+hard trends). A strategy's `evaluate(ctx, asset)` receives `ctx.candles`
+(closed candles, oldest first), `ctx.price` (last price), and `ctx.serverTime`
+(Pocket Option's clock — not `Date.now()`), and returns a
+`{direction, amount, duration}` proposal or null to wait. Swap strategies by
+editing `trade-bot.ts`.
+
+# Supported OTC Pairs
 
 | Asset ID | Name | Typical Payout |
 |----------|------|----------------|
@@ -157,22 +157,14 @@ npm install
 ### Start the bot
 
 ```bash
-npx tsx signal-bot.ts --expiry 1 --confidence 72
-# or: npm run signal
+npx tsx trade-bot.ts
+# or: npm start
 ```
 
 ### Run the price-capture engine standalone
 
 ```bash
 npx tsx server.ts
-# or: npm run capture
-```
-
-### Validate accuracy against the live feed
-
-```bash
-npx tsx accuracy-test.ts --expiry 1 --minutes 18
-# or: npm run test:accuracy -- --expiry 1 --minutes 18
 ```
 
 ### Programmatic Usage

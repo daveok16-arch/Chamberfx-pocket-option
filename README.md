@@ -1,30 +1,18 @@
-# CHAMBERFX — Pocket Option OTC Signal Bot
+# CHAMBERFX — Pocket Option OTC Trade Bot
 
-A production signal bot for Pocket Option OTC binary options, built in TypeScript. It captures **live market prices** directly from Pocket Option, runs a **regime-adaptive leading-indicator engine**, and delivers CALL/PUT signals to **Telegram** — deployable on **Render.com**.
+A TypeScript trading bot for Pocket Option OTC binary options. It captures **live market prices** directly from Pocket Option via the Socket.IO WebSocket and pipelines them through a clean, layered **strategy → risk → execution** architecture. The previous signal engine was deliberately removed to make room for this new infrastructure.
 
-> ⚠️ Trading disclaimer: This bot is for educational/research purposes. Binary options trading carries significant risk. The accuracy figures below are from limited live samples (n=37 / n=16). Always validate on a demo account before risking real money.
+> ⚠️ Trading disclaimer: This project is for educational/research purposes. Binary options trading carries significant risk. **The bot defaults to PAPER trading and never sends a real order** unless explicitly armed. Always validate strategies on a demo account before risking real money.
 
 ---
 
 ## What it does
 
 1. **Live price capture** — Uses Playwright (headless Chromium) to discover and authenticate to Pocket Option's live Socket.IO WebSocket, then streams real-time OTC ticks for 6 pairs (EURUSD, GBPUSD, USDJPY, XAUUSD, AUDUSD, USDCAD) and builds candles.
-2. **Regime-adaptive signal engine** — Detects market regime (trend vs mean-revert) via lag-1 return autocorrelation and fuses four **leading, non-lagging** components: Order-Flow Imbalance, candle anatomy (rejection wicks + engulfing, never flipped), tick momentum/decay, and market structure. Emits CALL/PUT/WAIT with a confidence score.
-3. **Telegram delivery** — Every emitted signal is sent to your Telegram chat (formatted with components, regime, confidence, reasons), plus a startup confirmation and a periodic price heartbeat.
-4. **Health endpoint** — A tiny HTTP server (`/health`) lets Render monitor the bot.
-
----
-
-## Live accuracy (validated against real Pocket Option feed)
-
-The engine was iterated against a no-look-ahead live accuracy harness (`accuracy-test.ts`) that predicts each asset's next-candle direction and resolves against the actual next candle.
-
-| Timeframe | v1 (before) | v2 (after) | ≥50 confidence tier |
-|-----------|-------------|------------|---------------------|
-| 1-minute  | 29.4%       | **51.4%**  | **64.7%**           |
-| 5-minute  | 27.3%       | **56.3%**  | above break-even    |
-
-Break-even at ~92% OTC payout is ~53% win rate, so **trading only ≥50-confidence signals is profitable** in these samples. Full methodology and per-asset/regime breakdowns are in `AGENTS.md`.
+2. **Strategy layer** (`strategy.ts`) — The *only* place that decides direction. A pluggable interface with a simple reference strategy; drop in your own.
+3. **Risk layer** (`risk.ts`) — Hard safety gates: per-trade stake cap, cooldown, rolling 24h loss stop, max concurrent positions, price sanity.
+4. **Execution layer** (`execution.ts`) — Raises the trade (`openOrder` protocol) over the authenticated WebSocket. **Defaults to PAPER mode.**
+5. **Health endpoint** — A tiny HTTP server (`/health`) lets Render monitor the bot.
 
 ---
 
@@ -32,13 +20,14 @@ Break-even at ~92% OTC payout is ~53% win rate, so **trading only ≥50-confiden
 
 ```
 price-bot/
-  server.ts         Live price-capture engine (Playwright + WebSocket)
-  signal.ts         Regime-adaptive SignalEngine (leading indicators)
-  signal-bot.ts     CLI: wires capture → engine → Telegram + health server
-  telegram.ts       Optional Telegram notifier (Node fetch, no extra deps)
-  accuracy-test.ts  Live next-candle accuracy harness
-  Dockerfile        Render.com deployment image (Node + Playwright)
-  render.yaml       (repo root) Render blueprint
+  server.ts            Live price-capture engine (Playwright + WebSocket)
+  strategy.ts          Strategy layer (pluggable decision engine)
+  risk.ts              Risk layer (hard safety gates)
+  execution.ts         Execution layer (paper/live openOrder)
+  trade-bot.ts         Entrypoint: wires strategy → risk → execution + health
+  risk-smoke-test.ts   Safety-gate self-check (npm run test:risk)
+Dockerfile             (repo root) Render.com deployment image
+render.yaml            (repo root) Render blueprint
 ```
 
 ---
@@ -50,22 +39,61 @@ cd price-bot
 npm install
 npx playwright install chromium
 
-# Optional: enable Telegram delivery
-export TELEGRAM_BOT_TOKEN="<from @BotFather>"
-export TELEGRAM_CHAT_ID="<your chat id>"
+# Run: 1-minute candles on the 6 default OTC assets
+npx tsx trade-bot.ts
 
-# Run: 1-minute expiry, only emit ≥72-confidence signals (v3 quality engine)
-npx tsx signal-bot.ts --expiry 1 --confidence 72
+# 3-minute / 5-minute candles
+npx tsx trade-bot.ts --period 180
+npx tsx trade-bot.ts --period 300
 ```
 
-CLI flags: `--expiry 1|3|5` (default 1), `--confidence N` (default 72). Both
-also accept the `EXPIRY` / `CONFIDENCE` environment variables (used by Render).
-
-Validate accuracy yourself:
+CLI flags: `--period 60|180|300` (default 60). Also accepts the `PERIOD`
+environment variable (used by Render):
 ```bash
-npx tsx accuracy-test.ts --expiry 1 --minutes 18
-npx tsx accuracy-test.ts --expiry 5 --minutes 40
+PERIOD=180 npx tsx trade-bot.ts
 ```
+
+---
+
+## Building a strategy
+
+Implement the `Strategy` interface in `price-bot/strategy.ts`:
+
+```ts
+import type { Strategy, StrategyContext, StrategySignal } from './strategy.js';
+
+export class MyStrategy implements Strategy {
+  readonly name = 'my-strategy';
+  evaluate(ctx: StrategyContext, asset: string): StrategySignal | null {
+    // ctx.candles  — closed candles, oldest first
+    // ctx.price    — last known price
+    // ctx.serverTime — Pocket Option's clock (not Date.now())
+    // return { direction: 'call'|'put', amount, duration } or null to wait
+  }
+}
+```
+
+The active strategy is **`MultiAssetReversionStrategy`** — a multi-asset,
+small-stake range-reversion approach across all 6 OTC pairs. It only acts on
+the just-closed candle when it has real range (volatility filter) and carries a
+rejection wick (leading candle-anatomy signal), and it skips assets in a hard
+trend. Stake is small (`$1`/trade) and spread equally across assets. The
+reference `CandleDirectionStrategy` is retained in `strategy.ts` as a template.
+Swap strategies by editing `trade-bot.ts`.
+
+### Safety / arming live
+
+- By default the bot runs **PAPER** — every "trade" is recorded locally, and
+  **no real order is sent**.
+- To arm **real money**, set `ALLOW_LIVE=1`, and the executor additionally
+  refuses to arm unless the authenticated session is a **non-demo** account.
+- Risk defaults in `trade-bot.ts`: stake cap `$5`/trade, `3-min` cooldown per
+  asset, `$50` rolling-24h loss stop, max `3` concurrent positions. Tune these
+  in the `RiskManager` config.
+
+The capture engine (`server.ts`) also exposes, per asset:
+`getCandles(assetId)`, `getPrice(assetId)`, `getTicks(assetId)`,
+`getAssetList()`, `getServerTime()`.
 
 ---
 
@@ -76,39 +104,20 @@ This repo is configured for Render via the `render.yaml` blueprint and a Dockerf
 ### Option A — Blueprint (recommended)
 1. Push this repo to GitHub.
 2. In Render: **New → Blueprint** → select the repo. Render reads `render.yaml` and creates the web service.
-3. Set the two **secret** env vars in the Render dashboard (they are marked `sync: false` so they are never read from the repo):
-   - `TELEGRAM_BOT_TOKEN` — from `@BotFather`
-   - `TELEGRAM_CHAT_ID` — your chat/channel id (get it from `@userinfobot`)
-4. Deploy. Render builds the Docker image (root `./Dockerfile`, app in `price-bot/`), installs Playwright/chromium, and starts the bot. Health checks hit `/health` on port `10000`.
+3. Deploy. Render builds the Docker image (root `./Dockerfile`, app in `price-bot/`), installs Playwright/chromium, and starts the bot. Health checks hit `/health` on port `10000`.
 
 ### Option B — Manual web service
 1. **New → Web Service** → connect the repo.
 2. **Runtime:** Docker. (Leave **Root Directory** empty — the Dockerfile is at the repo root.) **Dockerfile path:** `./Dockerfile`.
 3. **Instance plan:** `starter` or higher (Playwright/chromium needs ~1GB RAM — bump to `standard` if you see OOM).
-4. Add the env vars above. Deploy.
+4. Deploy.
 
-### Required environment variables
+### Environment variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `TELEGRAM_BOT_TOKEN` | yes (for signals) | Bot token from `@BotFather` |
-| `TELEGRAM_CHAT_ID` | yes (for signals) | Target chat/channel id |
-| `PORT` | no (default 10000) | HTTP health server port (Render sets this) |
-| `EXPIRY` | no (default 1) | Trade expiry in minutes |
-| `CONFIDENCE` | no (default 72) | Minimum signal confidence to emit |
-
-> If the Telegram env vars are absent, the bot still runs — it logs signals to the console and `signals.jsonl`, and prints a warning. It does **not** crash.
-
----
-
-## How the engine works (summary)
-
-- **Regime detection**: lag-1 return autocorrelation over recent closed candles → `TREND` / `MEAN_REVERT` / `UNCLEAR`. OTC short-timeframe data predominantly mean-reverts, so `UNCLEAR` defaults to mean-revert behavior.
-- **Continuation components** (OFI, body/marubozu conviction, momentum, structure) are **sign-flipped** in a mean-reverting regime (a bullish candle predicts a DOWN next candle) and kept as-is in a trend.
-- **Reversal components** (rejection wicks + engulfing) are **never flipped** — they already predict the opposite of the rejected extreme.
-- Confidence is boosted by regime strength and dampened by momentum decay.
-
-Full design notes, the fix history, and per-regime accuracy analysis live in `AGENTS.md`.
+| `PORT`   | no (default 10000) | HTTP health server port (Render sets this) |
+| `PERIOD` | no (default 60)   | Candle period in seconds: `60` \| `180` \| `300` |
 
 ---
 
@@ -117,7 +126,6 @@ Full design notes, the fix history, and per-regime accuracy analysis live in `AG
 - **TypeScript** + **tsx** (runs `.ts` directly, no build step needed)
 - **Playwright** (chromium) for Pocket Option session discovery
 - **ws** for WebSocket
-- **Node fetch** for the Telegram Bot API (no extra dependency)
 
 ## License
 

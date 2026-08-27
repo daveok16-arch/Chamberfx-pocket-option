@@ -1,24 +1,20 @@
-# Render.com Blueprint — Chamberfx Pocket Option OTC Signal Bot
-# =========================================================
-# Deploys the TypeScript signal bot as a Docker web service.
-# The bot captures live Pocket Option OTC prices via Playwright + WebSocket,
-# generates leading-indicator CALL/PUT signals, and delivers them to Telegram.
-# A small HTTP server on PORT answers /health for Render's health checks.
+# Render.com Blueprint — Chamberfx Pocket Option OTC Trade Bot
+# ============================================================
+# Deploys the TypeScript trade bot as a Docker web service.
+# The bot captures live Pocket Option OTC prices via Playwright + WebSocket
+# and exposes a /health endpoint. This is the capture foundation for building
+# trading strategies (the old signal engine was removed).
 #
 # The Dockerfile lives at the REPO ROOT (not price-bot/) so Render — which
 # clones the repo root — finds it directly. The app source is price-bot/.
 #
 # Apply: render blueprint deploy (Render dashboard) or `render blueprint apply`.
-# Required env vars (set as Render secret env vars, NOT committed):
-#   TELEGRAM_BOT_TOKEN  — Bot token from @BotFather
-#   TELEGRAM_CHAT_ID    — Target chat/channel id
 # Optional:
-#   EXPIRY              — 1 | 3 | 5  (default 1)
-#   CONFIDENCE          — min signal confidence 0-100 (default 72)
+#   PERIOD  — candle period in seconds: 60 | 180 | 300 (default 60)
 
 services:
   - type: web
-    name: chamberfx-signal-bot
+    name: chamberfx-trade-bot
     env: docker
     region: oregon
     plan: starter            # Playwright/chromium needs ~1GB; bump to standard if OOM
@@ -29,11 +25,5 @@ services:
         value: production
       - key: PORT
         value: 10000
-      - key: EXPIRY
-        value: "1"
-      - key: CONFIDENCE
-        value: "72"
-      - key: TELEGRAM_BOT_TOKEN
-        sync: false          # secret — set in Render dashboard
-      - key: TELEGRAM_CHAT_ID
-        sync: false          # secret — set in Render dashboard
+      - key: PERIOD
+        value: "60"

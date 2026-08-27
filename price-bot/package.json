@@ -1,14 +1,13 @@
 {
-  "name": "pocket-option-price-bot",
+  "name": "pocket-option-trade-bot",
   "version": "1.0.0",
-  "description": "Trading bot for Pocket Option OTC pairs - Live prices, technical analysis, signals",
+  "description": "Trading bot for Pocket Option OTC pairs - layered strategy/risk/execution on live price capture",
   "type": "module",
   "scripts": {
-    "start": "tsx signal-bot.ts --expiry 1 --confidence 72",
-    "signal": "tsx signal-bot.ts",
-    "render:start": "tsx signal-bot.ts --expiry 1 --confidence 72",
+    "start": "tsx trade-bot.ts",
+    "render:start": "tsx trade-bot.ts",
     "capture": "tsx server.ts",
-    "test:accuracy": "tsx accuracy-test.ts",
+    "test:risk": "tsx risk-smoke-test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc",
     "postinstall": "playwright install chromium --with-deps"
