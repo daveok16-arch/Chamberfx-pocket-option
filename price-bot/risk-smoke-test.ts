@@ -46,7 +46,7 @@ check('zero price rejected', !d4.allowed);
 
 // 5) Cooldown blocks a second trade on same asset before cooldown elapses.
 // registerOpen at t=10000 => cooldown (1s) ends at t=11000.
-paperRisk.registerOpen('a', 'EURUSD_otc', 5, 10000);
+paperRisk.registerOpen('a', 'EURUSD_otc', 5, 1.10, 'call', 60_000, 10000);
 paperRisk.settle('a', -5, 11000); // close it, but cooldown runs from 10000+1000
 const d5 = paperRisk.allow('EURUSD_otc', 1.1, 5, 10500, false);
 check('cooldown blocks repeat on same asset', !d5.allowed);
@@ -56,16 +56,37 @@ check('cooldown allows after window', d5b.allowed);
 
 // 6) Loss stop halts once daily loss = -10.
 const haltingRisk = new RiskManager({ maxDailyLoss: 10, maxConcurrentTrades: 5, live: false });
-haltingRisk.registerOpen('x', 'AUDUSD_otc', 5, 100000);
+haltingRisk.registerOpen('x', 'AUDUSD_otc', 5, 0.70, 'put', 60_000, 100000);
 haltingRisk.settle('x', -10, 110000);
 const d6 = haltingRisk.allow('AUDUSD_otc', 0.7, 5, 120000, false);
 check('daily loss stop halts trading', !d6.allowed && d6.reason.includes('loss stop'));
 
 // 7) Max concurrent trades.
 const concRisk = new RiskManager({ maxConcurrentTrades: 1, cooldownMs: 5000, live: false });
-concRisk.registerOpen('c1', 'XAUUSD_otc', 5, 100000);
+concRisk.registerOpen('c1', 'XAUUSD_otc', 5, 2000, 'call', 60_000, 100000);
 const d7 = concRisk.allow('XAUUSD_otc', 2000, 5, 110000, false);
 check('max concurrent trades blocks new entry', !d7.allowed && d7.reason.includes('max concurrent'));
+
+// --- Live-price auto-settlement (paper PnL from the real WS feed) --------------
+// A CALL opened at strike 1.1000, 60s window; at expiry the live price is 1.1010
+// (above strike) => won: stake * payout.
+const settleRisk = new RiskManager({ maxConcurrentTrades: 1, live: false });
+settleRisk.registerOpen('s1', 'EURUSD_otc', 5, 1.1000, 'call', 60_000, 100000);
+// Not yet expired (t=100000 + 60s = 160000).
+let openBefore = settleRisk.getOpenCount();
+settleRisk.settleExpired(150000, (a) => (a === 'EURUSD_otc' ? 1.1005 : 0));
+check('settleExpired keeps in-window position open', settleRisk.getOpenCount() === 1 && openBefore === 1);
+// Expired at t=160000+, live price above strike => win.
+const settledW = settleRisk.settleExpired(161000, (a) => (a === 'EURUSD_otc' ? 1.1010 : 0));
+check('settleExpired resolves win against live price', settledW.get('s1') === 5 * 0.92);
+check('settleExpired releases the concurrency slot', settleRisk.getOpenCount() === 0);
+
+// A PAY-at-strike (losing) PUT, then the loss feeds the daily-loss gate.
+const loseRisk = new RiskManager({ maxDailyLoss: 5, maxConcurrentTrades: 1, live: false });
+loseRisk.registerOpen('s2', 'AUDUSD_otc', 5, 0.7000, 'put', 60_000, 200000);
+const settledL = loseRisk.settleExpired(261000, (a) => (a === 'AUDUSD_otc' ? 0.7002 : 0)); // price above strike -> put loses
+check('settleExpired resolves loss against live price', settledL.get('s2') === -5);
+check('auto-settled loss feeds daily-loss stop', !loseRisk.allow('AUDUSD_otc', 0.7, 5, 270000, false).allowed);
 
 // --- ExecutionEngine PAPER behavior ----------------------------------------------
 // Use a fake bot whose isDemoMode()/getServerTime()/send() we can observe.
@@ -110,6 +131,22 @@ const liveResult = await exLive.submit(
 check('live submit sends an openOrder over the wire', liveResult !== null && sentLive.some(m => m.includes('"openOrder"') && m.includes('"action":"put"')));
 check('live sends isDemo:0', sentLive.some(m => m.includes('"isDemo":0')));
 check('live send also requires risk-armed (paper risk blocks live, verified separately above)', true);
+
+// --- Regression: isDemoMode() reads the REAL auth packet (bug#1: \b regex) ------
+// Drive the real isDemoMode() method through a real PocketOptionPriceBot and
+// verify it parses the demo flag instead of always defaulting to demo.
+const demoBot = new PocketOptionPriceBot();
+demoBot.setAuthPacketForTest('42["auth",{"isDemo":1,"token":"x"}]');
+const realNonDemoBot = new PocketOptionPriceBot();
+realNonDemoBot.setAuthPacketForTest('42["auth",{"isDemo":0,"token":"x"}]');
+const authNoFlagBot = new PocketOptionPriceBot();
+authNoFlagBot.setAuthPacketForTest('42["auth",{"token":"x"}]');
+check('real bot parses DEMO auth (isDemo:1 → demo)', demoBot.isDemoMode() === true);
+check('real bot parses LIVE auth (isDemo:0 → not demo)', realNonDemoBot.isDemoMode() === false);
+check('real bot defaults to safe demo when flag absent', authNoFlagBot.isDemoMode() === true);
+// End-to-end: a real non-demo bot with config.live arms LIVE via the executor.
+const exLiveReal = new ExecutionEngine(realNonDemoBot, { live: true });
+check('real non-demo bot + config.live arms live executor', exLiveReal.isLive());
 
 // --- Multi-asset reversion strategy logic -----------------------------------
 const strat = new MultiAssetReversionStrategy({ amount: 1, duration: 60 });

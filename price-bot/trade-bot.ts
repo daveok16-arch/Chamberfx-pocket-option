@@ -113,14 +113,42 @@ async function evaluateAsset(
     decision
   );
   if (result) {
-    risk.registerOpen(result.requestId, result.asset, result.amount, result.placedAt);
-    // Schedule settlement when the binary option expires
-    setTimeout(() => {
-      // Realized P&L: for PAPER mode we don't have the actual outcome, so we settle at 0
-      // (a production implementation would track the actual strike vs settlement price)
-      risk.settle(result.requestId, 0, bot.getServerTime());
-    }, result.duration * 1000);
+    // Record as an open position with the LIVE entry price (strike). The
+    // settlement loop later resolves PnL against live prices and releases
+    // this position's concurrency slot.
+    risk.registerOpen(
+      result.requestId,
+      result.asset,
+      result.amount,
+      price,
+      proposal.direction,
+      proposal.duration * 1000,
+      result.placedAt
+    );
   }
+}
+
+/**
+ * Periodic settlement loop. Resolves every expired open position's paper PnL
+ * against the live WS price and releases its concurrency slot, so the
+ * concurrency cap and 24h loss-stop actually see positions close over time.
+ */
+function startSettlementLoop(
+  risk: RiskManager,
+  bot: PocketOptionPriceBot,
+  everyMs = 1000
+): NodeJS.Timeout {
+  return setInterval(() => {
+    const now = bot.getServerTime();
+    const settled = risk.settleExpired(now, (asset) => bot.getPrice(asset));
+    if (settled.size > 0) {
+      for (const [requestId, pnl] of settled) {
+        console.log(`[SETTLE] ${requestId} pnl=${
+          pnl >= 0 ? `+${pnl.toFixed(2)}` : pnl.toFixed(2)
+        } (live) open=${risk.getOpenCount()}`);
+      }
+    }
+  }, everyMs);
 }
 
 // ============================================
@@ -221,6 +249,9 @@ async function main() {
     }
   }, 15000);
 
+  // --- Settlement loop: resolves paper PnL against live prices + frees slots ---
+  const settleTimer = startSettlementLoop(risk, bot);
+
   // --- Status printer: shows the engine is alive + mode ---
   let tickCount = 0;
   bot.onTick(() => { tickCount++; });
@@ -235,6 +266,7 @@ async function main() {
     console.log('\n\nShutting down...');
     clearInterval(evalTimer);
     clearInterval(statusTimer);
+    clearInterval(settleTimer);
     healthServer.close();
     bot.disconnect();
     process.exit(0);
