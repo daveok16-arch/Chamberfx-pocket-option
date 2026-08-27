@@ -158,7 +158,7 @@ npm install
 
 ```bash
 npx tsx trade-bot.ts
-# or: npm run capture
+# or: npm start
 ```
 
 ### Run the price-capture engine standalone

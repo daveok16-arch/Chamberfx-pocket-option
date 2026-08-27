@@ -57,10 +57,10 @@ const d6 = haltingRisk.allow('AUDUSD_otc', 0.7, 5, 120000, false);
 check('daily loss stop halts trading', !d6.allowed && d6.reason.includes('loss stop'));
 
 // 7) Max concurrent trades.
-const concRisk = new RiskManager({ maxConcurrentTrades: 1, live: false });
+const concRisk = new RiskManager({ maxConcurrentTrades: 1, cooldownMs: 5000, live: false });
 concRisk.registerOpen('c1', 'XAUUSD_otc', 5, 100000);
 const d7 = concRisk.allow('XAUUSD_otc', 2000, 5, 110000, false);
-check('max concurrent trades blocks new entry', !d7.allowed);
+check('max concurrent trades blocks new entry', !d7.allowed && d7.reason.includes('max concurrent'));
 
 // --- ExecutionEngine PAPER behavior ----------------------------------------------
 // Use a fake bot whose isDemoMode()/getServerTime()/send() we can observe.

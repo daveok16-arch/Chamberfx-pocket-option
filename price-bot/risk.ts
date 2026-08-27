@@ -92,6 +92,10 @@ export class RiskManager {
       return { allowed: false, reason: `cooldown active on ${asset}`, maxAmount: 0 };
     }
     // 5) Concurrent open positions cap.
+    // Prune open entries older than the maximum option duration (300s) as a backstop
+    // when settlement is missed.
+    const maxOptionDurationMs = 300_000;
+    this.open = this.open.filter(o => nowMs - o.openedAt < maxOptionDurationMs);
     if (this.open.length >= this.cfg.maxConcurrentTrades) {
       return { allowed: false, reason: `max concurrent trades reached (${this.open.length})`, maxAmount: 0 };
     }

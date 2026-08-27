@@ -39,6 +39,7 @@ EXPOSE 10000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
   CMD node -e "fetch('http://localhost:'+ (process.env.PORT||10000) +'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-# Default: capture-only base, 1-minute candles. Override candle period via the
+# Default: PAPER mode (simulated trading), 1-minute candles. Override candle period via the
 # PERIOD env var (60 | 180 | 300) or --period on the command line.
-CMD ["npx", "tsx", "trade-bot.ts"]
+ENTRYPOINT ["npx", "tsx", "trade-bot.ts"]
+CMD []

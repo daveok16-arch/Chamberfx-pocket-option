@@ -105,6 +105,12 @@ async function evaluateAsset(
   );
   if (result) {
     risk.registerOpen(result.requestId, result.asset, result.amount, result.placedAt);
+    // Schedule settlement when the binary option expires
+    setTimeout(() => {
+      // Realized P&L: for PAPER mode we don't have the actual outcome, so we settle at 0
+      // (a production implementation would track the actual strike vs settlement price)
+      risk.settle(result.requestId, 0, bot.getServerTime());
+    }, result.duration * 1000);
   }
 }
 
