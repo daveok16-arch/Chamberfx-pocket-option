@@ -1,11 +1,11 @@
-# Pocket Option OTC Signal Bot — Render.com deployment image
+# Pocket Option OTC Trade Bot — Render.com deployment image
 # =========================================================
 # Root-level Dockerfile so Render (which clones the repo root) finds it.
 # The app source lives in price-bot/.
 #
 # Build / run locally:
-#   docker build -t chamberfx-signal-bot .
-#   docker run -p 10000:10000 -e TELEGRAM_BOT_TOKEN=... -e TELEGRAM_CHAT_ID=... chamberfx-signal-bot
+#   docker build -t chamberfx-trade-bot .
+#   docker run -p 10000:10000 chamberfx-trade-bot
 
 # Playwright's official base image ships Node + the Chromium binary + OS deps
 # needed for headless Pocket Option session discovery.
@@ -39,6 +39,6 @@ EXPOSE 10000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
   CMD node -e "fetch('http://localhost:'+ (process.env.PORT||10000) +'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-# Default: 1-minute expiry, trade only >=72 confidence, trend-aligned signals (v3 quality engine: fewer, higher-conviction signals).
-# Override via Render env vars EXPIRY / CONFIDENCE if desired.
-CMD ["npx", "tsx", "signal-bot.ts", "--expiry", "1", "--confidence", "72"]
+# Default: capture-only base, 1-minute candles. Override candle period via the
+# PERIOD env var (60 | 180 | 300) or --period on the command line.
+CMD ["npx", "tsx", "trade-bot.ts"]

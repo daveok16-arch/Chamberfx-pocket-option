@@ -742,6 +742,38 @@ export class PocketOptionPriceBot {
   }
 
   /**
+   * Send a raw Socket.IO payload string over the authenticated WebSocket.
+   * Used by the strategy/execution layers to raise orders (openOrder) or
+   * re-request balance/candles while reusing this bot's authenticated session.
+   * Returns false if the socket is not open (no-op, never throws).
+   */
+  public send(message: string): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    try {
+      this.ws.send(message);
+      return true;
+    } catch (err) {
+      this.handleError(err as Error);
+      return false;
+    }
+  }
+
+  /**
+   * True when the authenticated session is a DEMO account (vs live/real).
+   * Detected from the `isDemo` field in the captured auth packet. Defaults to
+   * true when not determinable, so an execution layer is never accidentally
+   * aimed at a real account by default.
+   */
+  public isDemoMode(): boolean {
+    const m = /\b"isDemo"\s*:\s*(\d)/.exec(this.cachedAuthPacket);
+    if (m) return m[1] !== "1" ? false : true;
+    // Not found in the auth packet — assume demo as the safe default.
+    return true;
+  }
+
+  /**
    * Best-effort estimate of Pocket Option's SERVER clock (ms). Candle
    * openTime/closeTime are derived from tick timestamps which carry the
    * server clock, which is ~2h ahead of the container's Date.now() on this
