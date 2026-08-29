@@ -80,13 +80,6 @@ export class RiskManager {
     return this.cfg.live;
   }
 
-  /**
-   * Check if the risk manager is in paper (simulated) trading mode.
-   * @returns True if the risk manager is in paper mode
-   */
-  isPaper(): boolean {
-    return !this.cfg.live;
-  }
 
   /**
    * Decide whether a proposed trade on `asset` at `price`, now `nowMs`, is

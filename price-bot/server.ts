@@ -104,12 +104,6 @@ const DEFAULT_CONFIG: PriceCaptureConfig = {
   candlePeriod: 60
 };
 
-const POCKET_OPTION_URLS = [
-  "wss://api-us.po.market/socket.io/?EIO=4&transport=websocket",
-  "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket",
-  "wss://try-demo-eu.po.market/socket.io/?EIO=4&transport=websocket"
-];
-
 // ============================================
 // PRICE CAPTURE ENGINE
 // ============================================
@@ -121,18 +115,14 @@ export class PocketOptionPriceBot {
   private connected: boolean = false;
   private reconnectAttempts: number = 0;
   private reconnectTimeout: NodeJS.Timeout | null = null;
-  private pingInterval: NodeJS.Timeout | null = null;
-  private lastPingTime: number = 0;
   
   // Discovered session data
   private discoveredWsUrl: string = "";
   private cachedAuthPacket: string = "";
   private cachedCookies: string = "";
-  private isAuthenticated: boolean = false;
   
   // Binary attachment handling
   private pendingBinaryEvent: string | null = null;
-  private binaryDataBuffer: Buffer[] = [];
   
   // Price history (for export)
   private priceHistory: Map<string, Tick[]> = new Map();
@@ -341,7 +331,6 @@ export class PocketOptionPriceBot {
     // Socket.IO Heartbeat
     if (msg === "2") {
       this.ws?.send("3");
-      this.lastPingTime = Date.now();
       return;
     }
 
@@ -355,7 +344,6 @@ export class PocketOptionPriceBot {
     // Namespace join success (40)
     if (msg.startsWith("40")) {
       this.log("[WS] Joined namespace, authenticating...");
-      this.isAuthenticated = true;
       
       if (this.cachedAuthPacket) {
         this.log(`[WS] Sending auth packet: ${this.cachedAuthPacket.slice(0, 80)}...`);
@@ -380,7 +368,6 @@ export class PocketOptionPriceBot {
           const parsed = JSON.parse(jsonPart);
           if (Array.isArray(parsed) && parsed[1]?.num !== undefined) {
             this.pendingBinaryEvent = parsed[0];
-            this.binaryDataBuffer = [];
           }
         }
       } catch (e) {
@@ -715,7 +702,6 @@ export class PocketOptionPriceBot {
   private handleClose(code: number, reason: string): void {
     this.log(`[WS] Connection closed (${code}): ${reason}`);
     this.connected = false;
-    this.isAuthenticated = false;
     this.disconnectListeners.forEach(cb => cb());
     this.scheduleReconnect();
   }
@@ -778,16 +764,11 @@ export class PocketOptionPriceBot {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;
     }
-    if (this.pingInterval) {
-      clearInterval(this.pingInterval);
-      this.pingInterval = null;
-    }
     if (this.ws) {
       this.ws.close(1000, "Client disconnect");
       this.ws = null;
     }
     this.connected = false;
-    this.isAuthenticated = false;
   }
 
   /**
