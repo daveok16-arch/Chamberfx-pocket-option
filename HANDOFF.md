@@ -97,7 +97,7 @@ If you are on a fresh sandbox (no node_modules): `cd price-bot && npm install` f
 1. Review + merge **PR #5** (the critical fixes). Wait for the user's go-ahead to merge or monitor the PR.
 2. After #5 merges:
    - **End-to-end validation** that paper settlement resolves against real live prices from the WS feed:
-     `npx tsx trade-bot.ts --expiry 1 --confidence 72` (or via `npm run start`) in PAPER mode (do NOT set `ALLOW_LIVE`), let it run, verify logged/settled PnL tracks live prices.
+     `npx tsx trade-bot.ts` (or via `npm run start`)in PAPER mode (do NOT set `ALLOW_LIVE`), let it run, verify logged/settled PnL tracks live prices.
    - Optional: CI wiring (typecheck + smoke on PRs), main-based rebase test.
 
 ---

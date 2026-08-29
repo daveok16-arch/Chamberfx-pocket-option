@@ -1,16 +1,15 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-*.egg
-*.egg-info/
+# Node
+node_modules/
 dist/
-build/
+*.tsbuildinfo
 
-# Virtual environments
-venv/
+# Runtime artifacts
+*.log
+live-prices.json
+prices.json
+signals.jsonl
+
+# Environment
 .env
 
 # IDE
@@ -20,11 +19,3 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
-
-# Logs
-*.log
-
-# Test files
-.pytest_cache/
-.coverage
-htmlcov/
