@@ -243,10 +243,10 @@ async function main() {
   const strategy: Strategy = new MultiAssetReversionStrategy({
     amount: 1,          // small, equal stake per asset
     duration: candlePeriod, // match expiry to the candle period
-    minCandles: 20,
-    minRangeRatio: 0.0004,
+    minCandles: 12,    // faster to first signal after (re)connect warmup
+    minRangeRatio: 0.00025, // accept slightly smaller ranges while still filtering micro-candles
     lookback: 8,
-    maxTrendSlope: 0.0005,
+    maxTrendSlope: 0.0008, // mild-trend tolerance; hard trends still suppressed
   });
   const risk = new RiskManager({
     maxAmountPerTrade: 5,     // hard per-trade stake cap
