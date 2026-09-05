@@ -51,7 +51,10 @@ jobs:
           MINUTES=25
           echo "Session length: ${MINUTES}min (PAPER mode; no real orders sent)"
           # SECRETS: supplied only via repo secrets; nothing here or in files contains them..
-          timeout "$((MINUTES * 60)))" npx tsx trade-bot.ts
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "WARNING: TELEGRAM_BOT_TOKEN and/or TELEGRAM_CHAT_ID missing as repo secrets — signals will be recorded in signals.jsonl but NOT pushed;add them at Settings->Secrets->Actions."
+          fi
+          timeout "$((MINUTES * 60))" npx tsx trade-bot.ts
           code=$?
           # timeout exits 124 when the session window elapsed — that's the normal
           # end-of-run path for cron; a fresh run re-warms and captures again..
