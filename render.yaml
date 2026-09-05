@@ -27,3 +27,8 @@ services:
         value: 10000
       - key: PERIOD
         value: "60"
+      # Telegram signal delivery — set these on the Render dashboard (sync: false = not hardcoded in repo）。
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
