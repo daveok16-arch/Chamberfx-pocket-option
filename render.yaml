@@ -17,7 +17,7 @@ services:
     name: chamberfx-trade-bot
     env: docker
     region: oregon
-    plan: starter            # Playwright/chromium needs ~1GB; bump to standard if OOM
+    plan: standard           # Playwright+Chromium OOMs the 512MB starter (SIGTERM kills mid-session);standard gives headroom
     healthCheckPath: /health
     autoDeploy: true
     envVars:

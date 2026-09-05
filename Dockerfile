@@ -41,5 +41,8 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
 
 # Default: PAPER mode (simulated trading), 1-minute candles. Override candle period via the
 # PERIOD env var (60 | 180 | 300) or --period on the command line.
-ENTRYPOINT ["npx", "tsx", "trade-bot.ts"]
+# Run via the local tsx binary (not `npx`) so SIGTERM propagates cleanly —
+# npm's wrapper otherwise turns Render's stop signal into a noisy
+# "npm error command sh -c tsx" `failure`, and masks it as a code crash.
+ENTRYPOINT ["./node_modules/.bin/tsx", "trade-bot.ts"]
 CMD []
