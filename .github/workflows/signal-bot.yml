@@ -1,0 +1,68 @@
+name: signal-bot
+
+# Scheduled, stateless signal sessions on GitHub-hosted runners.
+# Each run: fresh container -> install -> discover PO demo WS -> capture
+# candles -> run the tuned multi-asset strategy -> push qualifying signals
+# to Telegram (via repo secrets; NO secrets are ever stored in this repo.
+#
+# Cadence is conservative on purpose: Pocket Option's WAF dislikes demo
+# session churn; tighten only after observing stable behavior for a while..
+on:
+  schedule:
+    - cron: '0,30 * * * *'   # every 30 min (tunable after soak-in)
+  workflow_dispatch:                 # manual kick-off (Actions tab -> Run workflow)
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: signal-bot-sessions
+  cancel-in-progress: false
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: price-bot/package-lock.json
+
+      - name: Install dependencies + Chromium
+        working-directory: price-bot
+        run: |
+          npm ci
+          npx playwright install chromium --with-deps
+
+      - name: Run signal session (PAPER mode by default)
+        working-directory: price-bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # Bounded session: fixed 25 min per run (conservative soak-in cadence..
+          MINUTES=25
+          echo "Session length: ${MINUTES}min (PAPER mode; no real orders sent)"
+          # SECRETS: supplied only via repo secrets; nothing here or in files contains them..
+          timeout "$((MINUTES * 60)))" npx tsx trade-bot.ts
+          code=$?
+          # timeout exits 124 when the session window elapsed — that's the normal
+          # end-of-run path for cron; a fresh run re-warms and captures again..
+          if [ "$code" -ne 124 ]; then exit "$code"; fi
+          echo "Session window elapsed (exit $code) — graceful end-of-run"
+
+      - name: Upload signals ledger (per-run artifact; not committed
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signals-jsonl
+          path: price-bot/signals.jsonl
+          if-no-files-found: ignore
+          retention-days: 7
