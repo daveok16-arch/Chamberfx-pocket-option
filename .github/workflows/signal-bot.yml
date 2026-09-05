@@ -5,24 +5,17 @@ name: signal-bot
 # candles -> run the tuned multi-asset strategy -> push qualifying signals
 # to Telegram (via repo secrets; NO secrets are ever stored in this repo.
 #
-# Cadence is conservative on purpose: Pocket Option's WAF/brot de need
-# demo session churn; tighten only after observing stable behavior for a while..
+# Cadence is conservative on purpose: Pocket Option's WAF dislikes demo
+# session churn; tighten only after observing stable behavior for a while..
 on:
   schedule:
     - cron: '0,30 * * * *'   # every 30 min (tunable after soak-in)
-  workflow_dispatch:                    # manual kick-off (Actions tab->Run workflow)
-    inputs:
-      minutes:
-        description: 'Session length (min); max 50'
-        required: false
-        default: '25'
+  workflow_dispatch:                 # manual kick-off (Actions tab -> Run workflow)
 
 permissions:
   contents: read
   actions: read
 
-# Do NOT cancel overlapping runs: each session is independent (fresh container)
-# and overlapping merely means two lanes temporarily (rare for 30-min cadence).
 concurrency:
   group: signal-bot-sessions
   cancel-in-progress: false
@@ -54,19 +47,14 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # Bounded session: default 25 min (from dispatch input或 cron default。
-          MINUTES='${{ inputs.minutes || "25" }}'
-          case "$MINUTES" in
-            ''|*[!0-9]*) MINUTES=25;;
-          esac
-          [ "$MINUTES" -ge 1 ] 2>/dev/null || MINUTES=25
-          [ "$MINUTES" -le 50 ] 2>/dev/null || MINUTES=25
-          echo "Session length: ${MINUTES}min (PAPER mode — no real orders sent)"
-          # SECRETS: supplied only viarepo secrets; nothing here or in files contains them.
+          # Bounded session: fixed 25 min per run (conservative soak-in cadence..
+          MINUTES=25
+          echo "Session length: ${MINUTES}min (PAPER mode; no real orders sent)"
+          # SECRETS: supplied only via repo secrets; nothing here or in files contains them..
           timeout "$((MINUTES * 60)))" npx tsx trade-bot.ts
           code=$?
-          # timeout exits 124 when the session-window elapsed — that's the normal
-          # end-of-run path for cron (a fresh run will re-warmup + capture again。.
+          # timeout exits 124 when the session window elapsed — that's the normal
+          # end-of-run path for cron; a fresh run re-warms and captures again..
           if [ "$code" -ne 124 ]; then exit "$code"; fi
           echo "Session window elapsed (exit $code) — graceful end-of-run"
 
