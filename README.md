@@ -81,6 +81,15 @@ trend. Stake is small (`$1`/trade) and spread equally across assets. The
 reference `CandleDirectionStrategy` is retained in `strategy.ts` as a template.
 Swap strategies by editing `trade-bot.ts`.
 
+### Signals (output)
+
+Every executed trade is published as a **signal**:
+
+- Appended to `signals.jsonl` (gitignored runtime artifact) — one JSON
+  object per line: `{type, asset, direction, price, amount, duration, mode, source, timestamp, serverTime}`
+- Optionally pushed to a webhook (`SIGNAL_WEBHOOK_URL`) and/or a Telegram chat
+  (`TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`) when those env vars are set..
+
 ### Safety / arming live
 
 - By default the bot runs **PAPER** — every "trade" is recorded locally, and

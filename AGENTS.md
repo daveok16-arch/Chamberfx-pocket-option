@@ -84,6 +84,16 @@ npx tsx server.ts                 # capture-only demo main
 - `candlePeriod` config controls tick->candle aggregation and the same period
   is used for the `changeSymbol` subscription.
 
+## Signals (output)
+- Every executed trade is appended to `signals.jsonl` (gitignored: one JSON
+  object per line: `{type, asset, direction, price, amount, duration, mode, source, timestamp, serverTime}`)
+- Optional delivery when env vars set: `SIGNAL_WEBHOOK_URL` (POST JSON), or
+  `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (Telegram markdown message.
+
+- `/health` endpoint exposes `signals` count (when the log exists.
+
+
+
 ## Status
 - Live capture verified: 6 OTC pairs, real auth, ticks streaming, candles
   building.
