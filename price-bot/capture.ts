@@ -18,7 +18,13 @@
  */
 
 import { PocketOptionPriceBot } from './server.js';
-import { FeatureLabelCollector, type StrategyContext } from './strategy.js';
+import {
+  FeatureLabelCollector,
+  InferenceClient,
+  type FeatureWindow,
+  type PredictionResult,
+  type StrategyContext,
+} from './strategy.js';
 import * as fs from 'fs';
 import * as http from 'http';
 
@@ -83,6 +89,26 @@ async function main() {
     signalsFile: './signals.json',
   });
 
+  // --- Inference: score each window at the 60s bucket boundary ---------
+  // Enabled only when INFERENCE_URL is set, so collection still runs
+  // standalone with no Python service present.
+  const inference = new InferenceClient();
+  const predictions: Record<string, PredictionResult> = {};
+
+  collector.onBucketBoundary((asset: string, features: FeatureWindow) => {
+    // Fire-and-forget: the async request must not block the evaluate loop.
+    void inference
+      .predict(asset, features)
+      .then((result) => {
+        if (!result) return;
+        predictions[asset] = result;
+        console.log(
+          `[INFER] ${asset} P(UP)=${result.probability.toFixed(4)} ` +
+            `-> ${result.direction === 1 ? 'UP(1)' : 'DOWN(0)'}`
+        );
+      });
+  });
+
   /**
    * Drive one collector cycle per asset: stream the engine's tick history and
    * current candles into the collector via the Strategy context.
@@ -125,7 +151,11 @@ async function main() {
     collectAll();     // ensure features are current before snapshotting
     writeOutputs();
     const s = collector.getStats();
-    console.log(`[COLLECT] labels=${s.labels} pending=${s.pending} assets=${s.assets} skipped=${s.skipped}`);
+    const inf = inference.getStats();
+    console.log(
+      `[COLLECT] labels=${s.labels} pending=${s.pending} assets=${s.assets} skipped=${s.skipped}` +
+        (inf.enabled ? ` | predictions ok=${inf.successes} failed=${inf.failures}` : '')
+    );
   }, 15000);
 
   // --- Health endpoint (Render platform health checks) ---
@@ -145,6 +175,8 @@ async function main() {
         assets: prices.size,
         prices: Object.fromEntries(prices),
         candlePeriod: `${candlePeriod}s`,
+        inference: inference.getStats(),
+        predictions,
         timestamp: Date.now(),
       }));
     } else {
