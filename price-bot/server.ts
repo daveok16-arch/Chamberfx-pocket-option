@@ -837,7 +837,7 @@ export class PocketOptionPriceBot {
 
   /**
    * Send a raw Socket.IO payload string over the authenticated WebSocket.
-   * Used by the strategy/execution layers to raise orders (openOrder) or
+   * Used by the execution layer to raise orders (openOrder) or
    * re-request balance/candles while reusing this bot's authenticated session.
    * Returns false if the socket is not open (no-op, never throws).
    */

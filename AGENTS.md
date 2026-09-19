@@ -12,11 +12,13 @@ was deliberately removed (2026-08-27) to make room for this architecture.
 Decisions and safety are separated into three layers, wired in `trade-bot.ts`:
 
 - `price-bot/strategy.ts` -- STRATEGY layer. The ONLY place that decides
-  direction (`'call' | 'put'`). `Strategy.evaluate(ctx, asset)` proposes a
-  trade from ticks + candles. Pluggable. Active: `MultiAssetReversionStrategy`
-  (multi-asset, small-stake range-reversion — volatility filter + rejection-wick
-  anatomy, skips hard trends). Reference `CandleDirectionStrategy` retained as a
-  template. Swap by editing `trade-bot.ts`.
+  direction (`'call' | 'put'`). Defines the `Strategy` contract
+  (`evaluate(ctx, asset)` proposes a trade from price + candles). Rule-based
+  implementations (`MultiAssetReversionStrategy`, `CandleDirectionStrategy`)
+  were TRUNCATED 2026-09-19 to make room for an AI/ML predictor. Active:
+  `NullStrategy` — an inert placeholder that never trades, keeping the pipeline
+  wired. Implement the predictor against the `Strategy` interface and swap it in
+  `trade-bot.ts`.
 - `price-bot/risk.ts` -- RISK layer. `RiskManager` hard-gates every proposal:
   per-trade stake cap, per-asset cooldown, rolling-24h loss stop, max
   concurrent positions, price sanity. Never decides direction.
@@ -100,4 +102,8 @@ npx tsx server.ts                 # capture-only demo main
 - Signal engine (signal.ts / signal-bot.ts / telegram.ts / accuracy-test.ts /
   engine-smoke-test.ts) deleted 2026-08-27. Replaced by the layered
   strategy/risk/execution pipeline above (PAPER-mode by default).
+- Rule-based strategies (`MultiAssetReversionStrategy`, `CandleDirectionStrategy`)
+  removed 2026-09-19 in favor of an upcoming AI/ML predictor. `strategy.ts` now
+  holds only the `Strategy` contract + inert `NullStrategy`; the pipeline stays
+  wired but never trades until a predictor is swapped in.
 - `server.ts` gained `send()` and `isDemoMode()` for the execution layer.

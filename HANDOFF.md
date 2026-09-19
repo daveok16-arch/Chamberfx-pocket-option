@@ -110,18 +110,18 @@ If you are on a fresh sandbox (no node_modules): `cd price-bot && npm install` f
 - Use `Co-authored-by: openhands <openhands@all-hands.dev>` on commits.
 - No new external deps unless required; existing deps suffice (Socket.IO client, Playwright, tsx).
 - Align candle period with expiry (`candlePeriod = expiry * 60`); clock-skew: candle openTime comes from Pocket Option server clock (~2h ahead of container `Date.now()`), always use `bot.getServerTime()` for settlement/timing.
-- Trade ALL 6 OTC pairs at ~$1 stake (multi-asset reversion strategy in `strategy.ts`).
+- Trade ALL 6 OTC pairs at ~$1 stake (rule-based strategies TRUNCATED 2026-09-19; awaiting an AI/ML predictor — `strategy.ts` is now contract-only + inert `NullStrategy`).
 
 ---
 
 ## Architecture map (price-bot/)
 
 - `server.ts` — verified live price-capture engine (Playwright discovers PO Socket.IO WS, auth packet, subscribes to OTC assets, ticks + candles). Exposes `getCandles(assetId)`, `getPrice(assetId)`, `getAssetList()`, `getServerTime()`, `isDemoMode()`, multi-listener callbacks. THIS is the "actual capture" source of live prices.
-- `strategy.ts` — `Strategy` interface + `MultiAssetReversionStrategy` (all 6 OTC pairs, range-reversion, volatility/range filter, rejection-wick leading edge, hard-trend suppression). Pure/leading; NO lagging indicators (no EMA/RSI/MACD/Bollinger).
+- `strategy.ts` — `Strategy` contract (`evaluate(ctx, asset)` → `{direction, amount, duration} | null`) + inert `NullStrategy`. Rule-based implementations (`MultiAssetReversionStrategy`, `CandleDirectionStrategy`) TRUNCATED 2026-09-19 in favor of an upcoming AI/ML predictor.
 - `risk.ts` — `RiskManager` safety gates (stake cap, cooldown, max concurrent, daily loss stop) + position model + `settleExpired` live-price settlement.
 - `execution.ts` — `ExecutionEngine` speaking Pocket Option `openOrder` WS protocol; refuses LIVE unless session is non-demo AND config.live.
 - `trade-bot.ts` — entrypoint wiring strategy -> risk -> execution + settlement loop + `/health` HTTP endpoint (for Render).
-- `risk-smoke-test.ts` — smoke test (30 checks).
+- `risk-smoke-test.ts` — smoke test (28 checks).
 - `package.json` — scripts: `start`/`render:start` = `tsx trade-bot.ts`, `capture` = `tsx server.ts`, `test:risk` = `tsx risk-smoke-test.ts`, `typecheck` = `tsc --noEmit`.
 
 Data interfaces: `Tick {assetId,price,timestamp,direction}`, `Candle {assetId,open,high,low,close,volume,openTime,closeTime}`, `AssetInfo {id,name,payout,active,lastPrice,ticks,candles}`.

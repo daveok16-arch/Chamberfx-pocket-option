@@ -9,7 +9,7 @@ deliberately removed to make room for new strategies.
 
 - **Real-time Price Capture**: Live tick data via WebSocket (Socket.IO protocol)
 - **Candle Building**: Configurable candle period (60/180/300s)
-- **Strategy Hook**: `onTick` / `onCandle` callbacks in `trade-bot.ts`
+- **Strategy Hook**: `Strategy` contract in `strategy.ts` (inert placeholder until the AI/ML predictor lands)
 - **Auto-Discovery**: Playwright automatically discovers the WebSocket session
 - **Multi-Asset**: Monitor 6 OTC pairs simultaneously
 - **Health Endpoint**: tiny HTTP `/health` server for platform health checks
@@ -33,18 +33,19 @@ npx tsx risk-smoke-test.ts      # verify the safety gates (npm run test:risk)
 Layered pipeline, wired in `trade-bot.ts`:
 
 - `server.ts` — live price-capture engine (`PocketOptionPriceBot`)
-- `strategy.ts` — decides direction (pluggable `Strategy` interface)
+- `strategy.ts` — decision contract (`Strategy`); inert `NullStrategy` placeholder
 - `risk.ts` — hard safety gates (`RiskManager`)
 - `execution.ts` — executes `openOrder` over the WS (PAPER by default)
 - `trade-bot.ts` — entrypoint wiring capture → strategy → risk → execution + health
 
-The active strategy is `MultiAssetReversionStrategy` (multi-asset, small-stake
-range-reversion using the volatility filter + rejection-wick anatomy; skips
-hard trends). A strategy's `evaluate(ctx, asset)` receives `ctx.candles`
-(closed candles, oldest first), `ctx.price` (last price), and `ctx.serverTime`
-(Pocket Option's clock — not `Date.now()`), and returns a
-`{direction, amount, duration}` proposal or null to wait. Swap strategies by
-editing `trade-bot.ts`.
+The rule-based strategies (`MultiAssetReversionStrategy`,
+`CandleDirectionStrategy`) were removed on 2026-09-19 to make room for an AI/ML
+predictor. `strategy.ts` now defines only the contract; the active strategy is
+`NullStrategy`, which never trades, so the pipeline runs fully wired but inert.
+A strategy's `evaluate(ctx, asset)` receives `ctx.candles` (closed candles,
+oldest first), `ctx.price` (last price), and `ctx.serverTime` (Pocket Option's
+clock — not `Date.now()`), and returns a `{direction, amount, duration}`
+proposal or null to wait. Swap the predictor in by editing `trade-bot.ts`.
 
 # Supported OTC Pairs
 

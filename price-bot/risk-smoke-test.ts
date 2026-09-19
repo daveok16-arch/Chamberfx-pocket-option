@@ -4,7 +4,7 @@
  */
 import { RiskManager } from './risk.js';
 import { ExecutionEngine } from './execution.js';
-import { MultiAssetReversionStrategy, type StrategyContext } from './strategy.js';
+import { NullStrategy, type StrategyContext } from './strategy.js';
 import { PocketOptionPriceBot } from './server.js';
 import type { Candle } from './server.js';
 
@@ -148,8 +148,8 @@ check('real bot defaults to safe demo when flag absent', authNoFlagBot.isDemoMod
 const exLiveReal = new ExecutionEngine(realNonDemoBot, { live: true });
 check('real non-demo bot + config.live arms live executor', exLiveReal.isLive());
 
-// --- Multi-asset reversion strategy logic -----------------------------------
-const strat = new MultiAssetReversionStrategy({ amount: 1, duration: 60 });
+// --- Inert placeholder strategy (rule-based strategy truncated 2026-09-19) ----
+const nullStrat = new NullStrategy();
 
 /**
  * Create a test candle with specified OHLC values.
@@ -163,44 +163,13 @@ function mkCandle(o: number, h: number, l: number, c: number): Candle {
   return { assetId: 'EURUSD_otc', open: o, high: h, low: l, close: c, volume: 1, openTime: 0, closeTime: 0 };
 }
 
-// A green candle with a long upper wick (rejection) within a ranged, flat history → PUT.
-const ctxReject: StrategyContext = {
+const ctxAny: StrategyContext = {
   price: 1.1,
   serverTime: 0,
-  candles: [
-    ...Array.from({ length: 22 }, () => mkCandle(1.1, 1.1, 1.1, 1.1)),
-    mkCandle(1.1, 1.1, 1.1, 1.1), // history flat/ranged
-    mkCandle(1.1000, 1.1000, 1.1000, 1.1000),
-    mkCandle(1.10, 1.105, 1.0995, 1.1005), // green with big upper wick
-  ],
+  candles: [mkCandle(1.1, 1.105, 1.0995, 1.1005)],
 };
-check('reversion: rejection wick → PUT', strat.evaluate(ctxReject, 'EURUSD_otc')?.direction === 'put');
-
-// A red candle with a long lower wick within a ranged history → CALL.
-const ctxRejectDown: StrategyContext = {
-  price: 1.1,
-  serverTime: 0,
-  candles: [
-    ...Array.from({ length: 24 }, () => mkCandle(1.1, 1.1, 1.1, 1.1)),
-    mkCandle(1.1005, 1.101, 1.0995, 1.10), // red with big lower wick
-  ],
-};
-check('reversion: rejection wick (down) → CALL', strat.evaluate(ctxRejectDown, 'EURUSD_otc')?.direction === 'call');
-
-// A strong uptrend (slope exceeds maxTrendSlope) → suppress (null).
-const ctxTrend: StrategyContext = {
-  price: 1.12,
-  serverTime: 0,
-  candles: [
-    ...Array.from({ length: 22 }, (_, i) => mkCandle(1.10 + i * 0.001, 1.10 + (i + 1) * 0.001, 1.10 + i * 0.001, 1.10 + i * 0.0012)),
-    mkCandle(1.122, 1.123, 1.121, 1.122), // trending up strongly
-  ],
-};
-check('reversion: hard trend suppresses signal', strat.evaluate(ctxTrend, 'EURUSD_otc') === null);
-
-// Too few candles → no signal.
-const ctxFew: StrategyContext = { price: 1.1, serverTime: 0, candles: [mkCandle(1.1, 1.1, 1.1, 1.1)] };
-check('reversion: too few candles → no signal', strat.evaluate(ctxFew, 'EURUSD_otc') === null);
+check('placeholder strategy never proposes a trade', nullStrat.evaluate(ctxAny, 'EURUSD_otc') === null);
+check('placeholder strategy is named "null"', nullStrat.name === 'null');
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

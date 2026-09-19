@@ -9,7 +9,7 @@ A TypeScript trading bot for Pocket Option OTC binary options. It captures **liv
 ## What it does
 
 1. **Live price capture** — Uses Playwright (headless Chromium) to discover and authenticate to Pocket Option's live Socket.IO WebSocket, then streams real-time OTC ticks for 6 pairs (EURUSD, GBPUSD, USDJPY, XAUUSD, AUDUSD, USDCAD) and builds candles.
-2. **Strategy layer** (`strategy.ts`) — The *only* place that decides direction. A pluggable interface with a simple reference strategy; drop in your own.
+2. **Strategy layer** (`strategy.ts`) — The *only* place that decides direction. Defines the pluggable `Strategy` contract the AI/ML predictor will implement. Currently a no-op placeholder (`NullStrategy`) that never trades.
 3. **Risk layer** (`risk.ts`) — Hard safety gates: per-trade stake cap, cooldown, rolling 24h loss stop, max concurrent positions, price sanity.
 4. **Execution layer** (`execution.ts`) — Raises the trade (`openOrder` protocol) over the authenticated WebSocket. **Defaults to PAPER mode.**
 5. **Health endpoint** — A tiny HTTP server (`/health`) lets Render monitor the bot.
@@ -21,7 +21,7 @@ A TypeScript trading bot for Pocket Option OTC binary options. It captures **liv
 ```
 price-bot/
   server.ts            Live price-capture engine (Playwright + WebSocket)
-  strategy.ts          Strategy layer (pluggable decision engine)
+  strategy.ts          Strategy layer (decision contract; inert placeholder)
   risk.ts              Risk layer (hard safety gates)
   execution.ts         Execution layer (paper/live openOrder)
   trade-bot.ts         Entrypoint: wires strategy → risk → execution + health
@@ -55,9 +55,10 @@ PERIOD=180 npx tsx trade-bot.ts
 
 ---
 
-## Building a strategy
+## Building the strategy
 
-Implement the `Strategy` interface in `price-bot/strategy.ts`:
+Implement the `Strategy` interface (defined in `price-bot/strategy.ts`) and wire
+it in `trade-bot.ts`:
 
 ```ts
 import type { Strategy, StrategyContext, StrategySignal } from './strategy.js';
@@ -73,13 +74,10 @@ export class MyStrategy implements Strategy {
 }
 ```
 
-The active strategy is **`MultiAssetReversionStrategy`** — a multi-asset,
-small-stake range-reversion approach across all 6 OTC pairs. It only acts on
-the just-closed candle when it has real range (volatility filter) and carries a
-rejection wick (leading candle-anatomy signal), and it skips assets in a hard
-trend. Stake is small (`$1`/trade) and spread equally across assets. The
-reference `CandleDirectionStrategy` is retained in `strategy.ts` as a template.
-Swap strategies by editing `trade-bot.ts`.
+The rule-based strategies (`MultiAssetReversionStrategy`, `CandleDirectionStrategy`)
+were removed on 2026-09-19. The active strategy is now `NullStrategy` — an inert
+placeholder that never trades, keeping the pipeline wired while the AI/ML
+predictor is built. Swap it in `trade-bot.ts`.
 
 ### Signals (output)
 

@@ -1,7 +1,7 @@
 {
   "name": "pocket-option-trade-bot",
   "version": "1.0.0",
-  "description": "Trading bot for Pocket Option OTC pairs - layered strategy/risk/execution on live price capture",
+  "description": "Trading bot for Pocket Option OTC pairs - layered capture/strategy/risk/execution awaiting an AI/ML predictor",
   "type": "module",
   "scripts": {
     "start": "tsx trade-bot.ts",

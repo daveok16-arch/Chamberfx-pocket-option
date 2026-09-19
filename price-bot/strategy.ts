@@ -1,12 +1,14 @@
 /**
- * Strategy Layer — the decision engine behind the trade bot
- * =========================================================
+ * Strategy Layer — the decision seam behind the trade bot
+ * ======================================================
  * Strategy is the ONLY place that decides trade direction. It consumes raw
- * market data (ticks + candles) and proposes CALL/PUT/WAIT with an amount.
- * The risk layer then gate-keeps; the execution layer then acts.
+ * market data (ticks + candles) and proposes CALL/PUT with an amount. The risk
+ * layer then gate-keeps; the execution layer then acts.
  *
- * This is intentionally a clean, pluggable interface for building the next
- * generation of strategies. A simple reference strategy is provided below.
+ * The previous rule-based implementations (candle-direction, range-reversion)
+ * were removed on 2026-09-19 to make room for an AI/ML predictor. This file now
+ * defines only the contract the predictor must satisfy; no trading logic lives
+ * here. Provide an implementation and wire it in `trade-bot.ts`.
  */
 
 import type { Candle } from './server.js';
@@ -40,137 +42,16 @@ export interface Strategy {
 }
 
 /**
- * Reference strategy — "candle-direction continuation".
- * If the just-closed candle closed above its open, propose CALL for the next
- * candle; below → PUT. Otherwise wait.
+ * Placeholder strategy — never trades.
  *
- * Deliberately simple: it demonstrates the interface, and is a clean slot to
- * replace with the real next-generation strategy you plan to build.
+ * Keeps the pipeline (capture -> strategy -> risk -> execution) intact and
+ * safely inert until the AI/ML predictor is wired in. Replace this in
+ * `trade-bot.ts` with the predictor's `Strategy` implementation.
  */
-export class CandleDirectionStrategy implements Strategy {
-  readonly name = 'candle-direction';
+export class NullStrategy implements Strategy {
+  readonly name = 'null';
 
-  /**
-   * Evaluate market conditions and propose a trade direction.
-   * Proposes CALL if the last candle closed above its open, PUT if below.
-   * @param ctx - Strategy context with price, candles, and server time
-   * @param _asset - Asset identifier (unused in this simple strategy)
-   * @returns Trade signal with direction, amount, and duration, or null to wait
-   */
-  evaluate(ctx: StrategyContext, _asset: string): StrategySignal | null {
-    const last = ctx.candles[ctx.candles.length - 1];
-    if (!last || !(ctx.price > 0)) return null;
-
-    if (last.close > last.open) {
-      return { direction: 'call', amount: 1, duration: 60 };
-    }
-    if (last.close < last.open) {
-      return { direction: 'put', amount: 1, duration: 60 };
-    }
-    return null;
-  }
-}
-
-export interface MultiAssetReversionConfig {
-  /** Stake per proposed trade (small by design — spread across many assets). */
-  amount: number;
-  /** Candle/option duration (60 | 180 | 300), matched to the candle period. */
-  duration: number;
-  /** Minimum candles needed before trading an asset. */
-  minCandles: number;
-  /**
-   * Minimum range (high - low) of the just-closed candle, as a fraction of
-   * price. Filters out random-walk micro-candles that carry no edge.
-   */
-  minRangeRatio: number;
-  /** How many candles (incl. the last) to inspect for trend alignment. */
-  lookback: number;
-  /** Skip trading if the recent net move exceeds this fraction of price. */
-  maxTrendSlope: number;
-}
-
-/**
- * Multi-asset, small-stake range-reversion strategy.
- *
- * Idea (led by the OTC short-timeframe behavior observed on this feed): over a
- * 1/3/5-minute OTC candle, an over-extended push in one direction tends to get
- * faded — the next candle frequently reverses the just-closed one. So:
- *
- *   - Only act when the just-closed candle has REAL range (volatility filter),
- *     i.e. > minRangeRatio × price, so we're not betting on a random-walk slip.
- *   - Read the leading signal from candle anatomy: a long upper wick on a green
- *     candle = rejection of up-moves → propose PUT (fade it); a long lower wick
- *     on a red candle = rejection of down-moves → propose CALL.
- *   - Prefer a neutral/ranged setting: skip when the asset has been trending
- *     hard (net lookback slope > maxTrendSlope), because range-reversion
- *     logic misfires inside a strong trend.
- *   - Small, equal stake per trade across all 6 assets (the "small-stake,
- *     multi-asset" approach) — spread risk rather than concentrate it.
- *
- * This is leading (candle anatomy + range, no lagging indicators), consistent
- * with the project's design constraints.
- */
-export class MultiAssetReversionStrategy implements Strategy {
-  readonly name = 'multi-asset-reversion';
-
-  private readonly cfg: MultiAssetReversionConfig;
-
-  /**
-   * Create a new multi-asset range-reversion strategy.
-   * @param cfg - Strategy configuration with amount, duration, volatility filters, and trend limits
-   */
-  constructor(cfg: Partial<MultiAssetReversionConfig> = {}) {
-    this.cfg = {
-      amount: cfg.amount ?? 1,
-      duration: cfg.duration ?? 60,
-      minCandles: cfg.minCandles ?? 20,
-      minRangeRatio: cfg.minRangeRatio ?? 0.0004,
-      lookback: cfg.lookback ?? 8,
-      maxTrendSlope: cfg.maxTrendSlope ?? 0.0005,
-    };
-  }
-
-  /**
-   * Evaluate market conditions and propose a range-reversion trade.
-   * Looks for rejection candles (long wicks) in ranged markets and fades them.
-   * Filters out low-volatility and strongly trending conditions.
-   * @param ctx - Strategy context with price, candles, and server time
-   * @param _asset - Asset identifier (unused in this implementation)
-   * @returns Trade signal with direction, amount, and duration, or null to wait
-   */
-  evaluate(ctx: StrategyContext, _asset: string): StrategySignal | null {
-    const candles = ctx.candles;
-    if (candles.length < this.cfg.minCandles) return null;
-    if (!(ctx.price > 0)) return null;
-
-    const last = candles[candles.length - 1];
-    const range = last.high - last.low;
-    if (!(range > 0)) return null;
-
-    // --- Volatility filter: skip micro/random-walk candles ---
-    if (range < this.cfg.minRangeRatio * ctx.price) return null;
-
-    // --- Trend-alignment filter: skip a strongly trending asset ---
-    const look0 = candles[candles.length - this.cfg.lookback];
-    const slope = Math.abs(last.close - look0.open) / look0.open;
-    if (slope > this.cfg.maxTrendSlope) return null;
-
-    const body = Math.abs(last.close - last.open);
-    // Interested in rejection candles (small-to-moderate body, long opposing wick).
-    const upperWick = last.high - Math.max(last.open, last.close);
-    const lowerWick = Math.min(last.open, last.close) - last.low;
-
-    const minWick = this.cfg.minRangeRatio * ctx.price * 0.5;
-
-    if (last.close > last.open && upperWick > body * 0.8 && upperWick > minWick) {
-      // Green candle with an over-extended upper wick → rejected higher prices → fade down.
-      return { direction: 'put', amount: this.cfg.amount, duration: this.cfg.duration };
-    }
-    if (last.close < last.open && lowerWick > body * 0.8 && lowerWick > minWick) {
-      // Red candle with an over-extended lower wick → rejected lower prices → fade up.
-      return { direction: 'call', amount: this.cfg.amount, duration: this.cfg.duration };
-    }
-
+  evaluate(_ctx: StrategyContext, _asset: string): StrategySignal | null {
     return null;
   }
 }

@@ -6,7 +6,7 @@
  * The new infrastructure is a clean, three-layer pipeline:
  *
  *   1. STRATEGY  (strategy.ts)  — the ONLY place that decides direction.
- *      Pluggable; a reference (candle-direction) strategy is provided.
+ *      Pluggable; currently a no-op placeholder awaiting the AI/ML predictor.
  *   2. RISK      (risk.ts)      — hard safety gates: stake cap, per-asset
  *      cooldown, rolling 24h loss-stop, concurrent-position cap, price sanity.
  *   3. EXECUTION (execution.ts) — raises the actual trade (openOrder protocol)
@@ -27,7 +27,7 @@
 import { PocketOptionPriceBot } from './server.js';
 import * as http from 'http';
 import * as fs from 'fs';
-import { MultiAssetReversionStrategy, type Strategy, type StrategyContext } from './strategy.js';
+import { NullStrategy, type Strategy, type StrategyContext } from './strategy.js';
 import { RiskManager } from './risk.js';
 import { ExecutionEngine } from './execution.js';
 
@@ -239,15 +239,9 @@ async function main() {
   // SAFETY: live execution requires the explicit ALLOW_LIVE=1 env var. Without
   // it, the whole pipeline runs in PAPER mode and never sends a real order.
   const allowLive = process.env.ALLOW_LIVE === '1';
-  // Multi-asset, small-stake range-reversion on all 6 OTC pairs.
-  const strategy: Strategy = new MultiAssetReversionStrategy({
-    amount: 1,          // small, equal stake per asset
-    duration: candlePeriod, // match expiry to the candle period
-    minCandles: 12,    // faster to first signal after (re)connect warmup
-    minRangeRatio: 0.00025, // accept slightly smaller ranges while still filtering micro-candles
-    lookback: 8,
-    maxTrendSlope: 0.0008, // mild-trend tolerance; hard trends still suppressed
-  });
+  // No-op placeholder until the AI/ML predictor replaces it. The pipeline
+  // (capture -> strategy -> risk -> execution) stays fully wired and inert.
+  const strategy: Strategy = new NullStrategy();
   const risk = new RiskManager({
     maxAmountPerTrade: 5,     // hard per-trade stake cap
     cooldownMs: 180_000,      // 3 min between trades on the same asset
