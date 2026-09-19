@@ -2,7 +2,6 @@
 **/dist
 **/*.log
 **/live-prices.json
-**/signals.jsonl
 **/prices.json
 .git
 **/.gitignore

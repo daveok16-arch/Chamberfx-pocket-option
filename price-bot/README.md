@@ -1,15 +1,14 @@
-# Pocket Option OTC Trade Bot — Capture Foundation
+# Pocket Option OTC — Live Price Capture
 
 A TypeScript foundation that captures **real-time OTC price data** from Pocket
-Option over the Socket.IO WebSocket (ticks + candles) and exposes a clean hook
-for implementing trading strategies. The previous signal engine was
-deliberately removed to make room for new strategies.
+Option over the Socket.IO WebSocket (ticks + candles). It is a pure market-data
+engine — the strategy, risk, execution, and paper-trading layers were removed on
+2026-09-19 so the AI/ML prediction pipeline can build on a clean slate.
 
 ## Features
 
 - **Real-time Price Capture**: Live tick data via WebSocket (Socket.IO protocol)
 - **Candle Building**: Configurable candle period (60/180/300s)
-- **Strategy Hook**: `Strategy` contract in `strategy.ts` (inert placeholder until the AI/ML predictor lands)
 - **Auto-Discovery**: Playwright automatically discovers the WebSocket session
 - **Multi-Asset**: Monitor 6 OTC pairs simultaneously
 - **Health Endpoint**: tiny HTTP `/health` server for platform health checks
@@ -19,33 +18,18 @@ deliberately removed to make room for new strategies.
 ```bash
 npm install
 npx playwright install chromium
-npx tsx trade-bot.ts            # default 1m candles, PAPER mode
-npx tsx trade-bot.ts --period 300   # 5-minute candles
-npx tsx risk-smoke-test.ts      # verify the safety gates (npm run test:risk)
+npx tsx capture.ts                  # default 1m candles + /health
+npx tsx capture.ts --period 300     # 5-minute candles
 ```
-
-> ⚠️ **PAPER mode by default** — the bot records every proposed trade locally
-> and never sends a real order. To arm real-money execution you must run with
-> `ALLOW_LIVE=1` AND have an authenticated non-demo session.
 
 ## Architecture
 
-Layered pipeline, wired in `trade-bot.ts`:
-
 - `server.ts` — live price-capture engine (`PocketOptionPriceBot`)
-- `strategy.ts` — decision contract (`Strategy`); inert `NullStrategy` placeholder
-- `risk.ts` — hard safety gates (`RiskManager`)
-- `execution.ts` — executes `openOrder` over the WS (PAPER by default)
-- `trade-bot.ts` — entrypoint wiring capture → strategy → risk → execution + health
+- `capture.ts` — entrypoint: starts capture + `/health` HTTP server
 
-The rule-based strategies (`MultiAssetReversionStrategy`,
-`CandleDirectionStrategy`) were removed on 2026-09-19 to make room for an AI/ML
-predictor. `strategy.ts` now defines only the contract; the active strategy is
-`NullStrategy`, which never trades, so the pipeline runs fully wired but inert.
-A strategy's `evaluate(ctx, asset)` receives `ctx.candles` (closed candles,
-oldest first), `ctx.price` (last price), and `ctx.serverTime` (Pocket Option's
-clock — not `Date.now()`), and returns a `{direction, amount, duration}`
-proposal or null to wait. Swap the predictor in by editing `trade-bot.ts`.
+No trading logic exists here. There is no strategy, risk, execution, signal, or
+paper-trading code. An ML pipeline consumes this feed via the engine's API
+(`getCandles`, `getPrice`, `getTicks`, `onTick`, `onCandle`).
 
 # Supported OTC Pairs
 
@@ -106,7 +90,7 @@ proposal or null to wait. Swap the predictor in by editing `trade-bot.ts`.
        │                                     │
        │  7. Subscribe to Assets             │
        │     42["changeSymbol",{"asset":     │
-       │        "EURUSD_otc","period":60}]   │  (period = candlePeriod = expiry*60)
+       │        "EURUSD_otc","period":60}]   │  (period = candlePeriod)
        │────────────────────────────────────►│
 ```
 
@@ -132,7 +116,7 @@ Ticks: 1.08530 → 1.08535 → 1.08540 → 1.08538 → 1.08542
                                                     │
                                                     ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  Candle (period = candlePeriod, default/expiry 60s = 1m)   │
+│  Candle (period = candlePeriod, default 60s = 1m)          │
 ├─────────────────────────────────────────────────────────────┤
 │  Open:  1.08530  (first tick)                             │
 │  High:  1.08542  (max tick)                               │
@@ -142,10 +126,10 @@ Ticks: 1.08530 → 1.08535 → 1.08540 → 1.08538 → 1.08542
 └─────────────────────────────────────────────────────────────┘
 ```
 
-Candle period follows the signal expiry (`candlePeriod = expiry * 60`), so 3m
-and 5m expiries build/seed 3m and 5m candles. Timestamps come from Pocket
-Option's server clock (~2h ahead of the container clock); timing math in the
-engine is anchored to candle boundaries, not `Date.now()`.
+Candle period is configurable (`candlePeriod`), so 3m and 5m settings build and
+seed 3m and 5m candles. Timestamps come from Pocket Option's server clock (~2h
+ahead of the container clock); timing math in the engine is anchored to candle
+boundaries, not `Date.now()`.
 
 ## Installation
 
@@ -155,10 +139,10 @@ npm install
 
 ## Usage
 
-### Start the bot
+### Start live capture
 
 ```bash
-npx tsx trade-bot.ts
+npx tsx capture.ts
 # or: npm start
 ```
 
@@ -300,13 +284,13 @@ bot.disconnect();
 ### Price Issues
 
 1. **No ticks received**
-   - Verify assets are active/tradeable
+   - Verify assets are active
    - Check if WebSocket is authenticated
 
 2. **Stale prices**
    - Connection may have dropped
-   - Bot will auto-reconnect
+   - The engine auto-reconnects
 
 ## License
 
-MIT - Use at your own risk. This is for educational purposes.
+MIT

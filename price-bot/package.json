@@ -1,13 +1,12 @@
 {
-  "name": "pocket-option-trade-bot",
+  "name": "pocket-option-price-capture",
   "version": "1.0.0",
-  "description": "Trading bot for Pocket Option OTC pairs - layered capture/strategy/risk/execution awaiting an AI/ML predictor",
+  "description": "Pocket Option OTC live price capture foundation (ticks + candles) for an AI/ML prediction pipeline",
   "type": "module",
   "scripts": {
-    "start": "tsx trade-bot.ts",
-    "render:start": "tsx trade-bot.ts",
-    "capture": "tsx server.ts",
-    "test:risk": "tsx risk-smoke-test.ts",
+    "start": "tsx capture.ts",
+    "render:start": "tsx capture.ts",
+    "capture": "tsx capture.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc",
     "postinstall": "playwright install chromium --with-deps"

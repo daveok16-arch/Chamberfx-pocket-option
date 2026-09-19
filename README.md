@@ -1,18 +1,25 @@
-# CHAMBERFX — Pocket Option OTC Trade Bot
+# CHAMBERFX — Pocket Option OTC Live Price Capture
 
-A TypeScript trading bot for Pocket Option OTC binary options. It captures **live market prices** directly from Pocket Option via the Socket.IO WebSocket and pipelines them through a clean, layered **strategy → risk → execution** architecture. The previous signal engine was deliberately removed to make room for this new infrastructure.
+A TypeScript **market-data capture foundation** for Pocket Option OTC pairs. It
+connects to the broker's live Socket.IO WebSocket, streams real-time ticks, and
+builds candles — nothing more.
 
-> ⚠️ Trading disclaimer: This project is for educational/research purposes. Binary options trading carries significant risk. **The bot defaults to PAPER trading and never sends a real order** unless explicitly armed. Always validate strategies on a demo account before risking real money.
+There is deliberately **no strategy, risk, execution, signal, or paper-trading
+layer**. Those were removed on 2026-09-19 so the AI/ML prediction pipeline can
+be built on a clean slate. What remains is a verified live feed plus a small
+`/health` endpoint.
+
+> ⚠️ This project streams live market data only. It places no orders and holds
+> no trading logic. Any future execution path must be added deliberately.
 
 ---
 
 ## What it does
 
-1. **Live price capture** — Uses Playwright (headless Chromium) to discover and authenticate to Pocket Option's live Socket.IO WebSocket, then streams real-time OTC ticks for 6 pairs (EURUSD, GBPUSD, USDJPY, XAUUSD, AUDUSD, USDCAD) and builds candles.
-2. **Strategy layer** (`strategy.ts`) — The *only* place that decides direction. Defines the pluggable `Strategy` contract the AI/ML predictor will implement. Currently a no-op placeholder (`NullStrategy`) that never trades.
-3. **Risk layer** (`risk.ts`) — Hard safety gates: per-trade stake cap, cooldown, rolling 24h loss stop, max concurrent positions, price sanity.
-4. **Execution layer** (`execution.ts`) — Raises the trade (`openOrder` protocol) over the authenticated WebSocket. **Defaults to PAPER mode.**
-5. **Health endpoint** — A tiny HTTP server (`/health`) lets Render monitor the bot.
+1. **Session discovery** — Uses Playwright (headless Chromium) to load Pocket Option and intercept the authenticated Socket.IO WebSocket URL, session cookies, and auth packet.
+2. **Live capture** — Connects to that WebSocket, subscribes to 6 OTC pairs (EURUSD, GBPUSD, USDJPY, XAUUSD, AUDUSD, USDCAD), and streams real-time ticks.
+3. **Candle building** — Aggregates ticks into OHLC candles on a configurable period (60/180/300s).
+4. **Health endpoint** — A tiny HTTP server (`/health`) exposes connection state, live prices, and per-asset candle counts for Render.
 
 ---
 
@@ -21,11 +28,8 @@ A TypeScript trading bot for Pocket Option OTC binary options. It captures **liv
 ```
 price-bot/
   server.ts            Live price-capture engine (Playwright + WebSocket)
-  strategy.ts          Strategy layer (decision contract; inert placeholder)
-  risk.ts              Risk layer (hard safety gates)
-  execution.ts         Execution layer (paper/live openOrder)
-  trade-bot.ts         Entrypoint: wires strategy → risk → execution + health
-  risk-smoke-test.ts   Safety-gate self-check (npm run test:risk)
+  capture.ts           Entrypoint: starts capture + /health (no trading logic)
+  tsconfig.json        TypeScript config
 Dockerfile             (repo root) Render.com deployment image
 render.yaml            (repo root) Render blueprint
 ```
@@ -39,68 +43,54 @@ cd price-bot
 npm install
 npx playwright install chromium
 
-# Run: 1-minute candles on the 6 default OTC assets
-npx tsx trade-bot.ts
+# Start live capture (1-minute candles) + health server
+npx tsx capture.ts
 
 # 3-minute / 5-minute candles
-npx tsx trade-bot.ts --period 180
-npx tsx trade-bot.ts --period 300
+npx tsx capture.ts --period 180
+npx tsx capture.ts --period 300
 ```
 
 CLI flags: `--period 60|180|300` (default 60). Also accepts the `PERIOD`
 environment variable (used by Render):
 ```bash
-PERIOD=180 npx tsx trade-bot.ts
+PERIOD=180 npx tsx capture.ts
 ```
 
 ---
 
-## Building the strategy
+## Building the ML pipeline
 
-Implement the `Strategy` interface (defined in `price-bot/strategy.ts`) and wire
-it in `trade-bot.ts`:
+The capture engine is the data source. Wrap it (or import `PocketOptionPriceBot`
+from `server.ts`) and read the feed:
 
 ```ts
-import type { Strategy, StrategyContext, StrategySignal } from './strategy.js';
+import { PocketOptionPriceBot } from './server.js';
 
-export class MyStrategy implements Strategy {
-  readonly name = 'my-strategy';
-  evaluate(ctx: StrategyContext, asset: string): StrategySignal | null {
-    // ctx.candles  — closed candles, oldest first
-    // ctx.price    — last known price
-    // ctx.serverTime — Pocket Option's clock (not Date.now())
-    // return { direction: 'call'|'put', amount, duration } or null to wait
-  }
-}
+const bot = new PocketOptionPriceBot({ candlePeriod: 60, /* ... */ });
+
+bot.onCandle((candle) => {
+  // closed candle: { assetId, open, high, low, close, volume, openTime, closeTime }
+});
+
+bot.onTick((tick) => {
+  // { assetId, price, timestamp, direction }
+});
+
+await bot.connect();
+
+// Pull-based access at any time:
+const candles = bot.getCandles('EURUSD_otc'); // oldest first
+const price = bot.getPrice('EURUSD_otc');
 ```
 
-The rule-based strategies (`MultiAssetReversionStrategy`, `CandleDirectionStrategy`)
-were removed on 2026-09-19. The active strategy is now `NullStrategy` — an inert
-placeholder that never trades, keeping the pipeline wired while the AI/ML
-predictor is built. Swap it in `trade-bot.ts`.
+The rule-based strategy/risk/execution layers were removed on 2026-09-19. There
+is no decision code in this repo anymore — add the predictor deliberately.
 
-### Signals (output)
-
-Every executed trade is published as a **signal**:
-
-- Appended to `signals.jsonl` (gitignored runtime artifact) — one JSON
-  object per line: `{type, asset, direction, price, amount, duration, mode, source, timestamp, serverTime}`
-- Optionally pushed to a webhook (`SIGNAL_WEBHOOK_URL`) and/or a Telegram chat
-  (`TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`) when those env vars are set..
-
-### Safety / arming live
-
-- By default the bot runs **PAPER** — every "trade" is recorded locally, and
-  **no real order is sent**.
-- To arm **real money**, set `ALLOW_LIVE=1`, and the executor additionally
-  refuses to arm unless the authenticated session is a **non-demo** account.
-- Risk defaults in `trade-bot.ts`: stake cap `$5`/trade, `3-min` cooldown per
-  asset, `$50` rolling-24h loss stop, max `3` concurrent positions. Tune these
-  in the `RiskManager` config.
-
-The capture engine (`server.ts`) also exposes, per asset:
-`getCandles(assetId)`, `getPrice(assetId)`, `getTicks(assetId)`,
-`getAssetList()`, `getServerTime()`.
+The engine also exposes `getTicks(assetId)`, `getAssetList()`, and
+`getServerTime()` (Pocket Option's clock — ~2h ahead of `Date.now()` on this
+host, so use it for any timing/window math). `live-prices.json` is written for
+offline use.
 
 ---
 
@@ -111,7 +101,7 @@ This repo is configured for Render via the `render.yaml` blueprint and a Dockerf
 ### Option A — Blueprint (recommended)
 1. Push this repo to GitHub.
 2. In Render: **New → Blueprint** → select the repo. Render reads `render.yaml` and creates the web service.
-3. Deploy. Render builds the Docker image (root `./Dockerfile`, app in `price-bot/`), installs Playwright/chromium, and starts the bot. Health checks hit `/health` on port `10000`.
+3. Deploy. Render builds the Docker image (root `./Dockerfile`, app in `price-bot/`), installs Playwright/chromium, and starts the capture engine. Health checks hit `/health` on port `10000`.
 
 ### Option B — Manual web service
 1. **New → Web Service** → connect the repo.

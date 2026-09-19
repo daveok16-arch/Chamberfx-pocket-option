@@ -7,7 +7,6 @@ dist/
 *.log
 live-prices.json
 prices.json
-signals.jsonl
 
 # Environment
 .env

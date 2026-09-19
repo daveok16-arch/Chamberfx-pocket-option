@@ -1,11 +1,11 @@
-# Pocket Option OTC Trade Bot — Render.com deployment image
-# =========================================================
+# Pocket Option OTC Live Price Capture — Render.com deployment image
+# ==================================================================
 # Root-level Dockerfile so Render (which clones the repo root) finds it.
 # The app source lives in price-bot/.
 #
 # Build / run locally:
-#   docker build -t chamberfx-trade-bot .
-#   docker run -p 10000:10000 chamberfx-trade-bot
+#   docker build -t chamberfx-capture .
+#   docker run -p 10000:10000 chamberfx-capture
 
 # Playwright's official base image ships Node + the Chromium binary + OS deps
 # needed for headless Pocket Option session discovery.
@@ -39,10 +39,10 @@ EXPOSE 10000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
   CMD node -e "fetch('http://localhost:'+ (process.env.PORT||10000) +'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-# Default: PAPER mode (simulated trading), 1-minute candles. Override candle period via the
+# Capture-only: 1-minute candles by default. Override the candle period via the
 # PERIOD env var (60 | 180 | 300) or --period on the command line.
 # Run via the local tsx binary (not `npx`) so SIGTERM propagates cleanly —
 # npm's wrapper otherwise turns Render's stop signal into a noisy
 # "npm error command sh -c tsx" `failure`, and masks it as a code crash.
-ENTRYPOINT ["./node_modules/.bin/tsx", "trade-bot.ts"]
+ENTRYPOINT ["./node_modules/.bin/tsx", "capture.ts"]
 CMD []

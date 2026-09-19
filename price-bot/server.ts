@@ -71,8 +71,8 @@ export interface PriceCaptureConfig {
   /** Max reconnection attempts */
   maxReconnectAttempts: number;
   /** Candle period in seconds (default 60 = 1-minute candles).
-   *  Must match the signal expiry (1/3/5 minutes → 60/180/300) so the
-   *  candles built from ticks align with the period the engine predicts. */
+   *  Candle period (1/3/5 minutes → 60/180/300) so the candles built from
+   *  ticks align with the horizon the ML models will predict. */
   candlePeriod: number;
   /** Subscription period (seconds) sent to Pocket Option in the changeSymbol
    *  packet. Defaults to candlePeriod. Pocket Option returns history at this
@@ -836,56 +836,10 @@ export class PocketOptionPriceBot {
   }
 
   /**
-   * Send a raw Socket.IO payload string over the authenticated WebSocket.
-   * Used by the execution layer to raise orders (openOrder) or
-   * re-request balance/candles while reusing this bot's authenticated session.
-   * Returns false if the socket is not open (no-op, never throws).
-   */
-  public send(message: string): boolean {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      return false;
-    }
-    try {
-      this.ws.send(message);
-      return true;
-    } catch (err) {
-      this.handleError(err as Error);
-      return false;
-    }
-  }
-
-  /**
-   * True when the authenticated session is a DEMO account (vs live/real).
-   * Detected from the `isDemo` field in the captured auth packet. Defaults to
-   * true when not determinable, so an execution layer is never accidentally
-   * aimed at a real account by default.
-   *
-   * NOTE: the `isDemo` key is bare JSON, immediately after `{` or `,` — there
-   * is NO `\b` word boundary at that position in JS regexes (both neighbors are
-   * non-word chars), so a `\b` prefix would make this never match. The
-   * captured auth packet is exactly `42["auth",{...}]`, JSON-ish; we search the
-   * raw string for the key so it works whether quoted with `"` or not.
-   */
-  public isDemoMode(): boolean {
-    const m = /"isDemo"\s*:\s*(\d)/.exec(this.cachedAuthPacket) ?? /isDemo\s*:\s*(\d)/.exec(this.cachedAuthPacket);
-    if (m) return m[1] === "1";
-    // Not found in the auth packet — assume demo as the safe default.
-    return true;
-  }
-
-  /**
-   * For testability: expose the captured auth packet so isDemoMode() and
-   * execution gating can be unit-tested without a live WebSocket session.
-   */
-  public setAuthPacketForTest(packet: string): void {
-    this.cachedAuthPacket = packet;
-  }
-
-  /**
    * Best-effort estimate of Pocket Option's SERVER clock (ms). Candle
    * openTime/closeTime are derived from tick timestamps which carry the
    * server clock, which is ~2h ahead of the container's Date.now() on this
-   * host. Signal timing (time-remaining-in-candle, entry quality) MUST use
+   * host. Timing math (time-remaining-in-candle, feature windows) MUST use
    * the server clock, not Date.now(), or it will be wrong by the skew.
    *
    * Falls back to Date.now() only when no candles are available yet.
