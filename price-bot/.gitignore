@@ -4,5 +4,4 @@ dist/
 # Runtime artifacts
 *.log
 live-prices.json
-signals.jsonl
 prices.json

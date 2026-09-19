@@ -1,9 +1,9 @@
-# Render.com Blueprint — Chamberfx Pocket Option OTC Trade Bot
-# ============================================================
-# Deploys the TypeScript trade bot as a Docker web service.
-# The bot captures live Pocket Option OTC prices via Playwright + WebSocket
-# and exposes a /health endpoint. This is the capture foundation for building
-# trading strategies (the old signal engine was removed).
+# Render.com Blueprint — Chamberfx Pocket Option OTC Live Price Capture
+# =====================================================================
+# Deploys the TypeScript capture engine as a Docker web service.
+# It streams live Pocket Option OTC ticks + candles over the authenticated
+# Socket.IO WebSocket and exposes a /health endpoint. This is the market-data
+# foundation for the AI/ML prediction pipeline (no strategy/risk/execution).
 #
 # The Dockerfile lives at the REPO ROOT (not price-bot/) so Render — which
 # clones the repo root — finds it directly. The app source is price-bot/.
@@ -14,7 +14,7 @@
 
 services:
   - type: web
-    name: chamberfx-trade-bot
+    name: chamberfx-price-capture
     env: docker
     region: oregon
     plan: standard           # Playwright+Chromium OOMs the 512MB starter (SIGTERM kills mid-session);standard gives headroom
@@ -27,8 +27,3 @@ services:
         value: 10000
       - key: PERIOD
         value: "60"
-      # Telegram signal delivery — set these on the Render dashboard (sync: false = not hardcoded in repo）。
-      - key: TELEGRAM_BOT_TOKEN
-        sync: false
-      - key: TELEGRAM_CHAT_ID
-        sync: false
