@@ -33,9 +33,17 @@ future execution path must be added deliberately, with its own safety design.
   Defines the `Strategy` contract (`evaluate(ctx, asset)`), the
   `FeatureLabelCollector` (emits the supervised-learning dataset; never proposes
   a trade), and `InferenceClient` (POSTs feature windows to the Python service).
+- `price-bot/signalFilter.ts` -- PHASE 3 signal quality filters. Pure, no side
+  effects. `MIN_CONFIDENCE_THRESHOLD = 0.65`,
+  `MAX_SPREAD_VOLATILITY_PCT = 0.02`, no-trade zone `P in [0.36, 0.64]`.
+  `evaluateSignal(prediction, features)` returns an accepted `ValidSignal`
+  (`{timestamp, asset, direction:'CALL'|'PUT', confidence}`) or a discard reason.
+  Confidence is `max(P, 1-P)`.
 - `price-bot/capture.ts` -- entrypoint: capture + collector loop + inference at
-  bucket boundaries + `/health`. Writes `live-prices.json` (features) and
-  `signals.json` (labels) every 15s and flushes on SIGINT.
+  bucket boundaries + Phase 3 filtering + `/health`. Writes `live-prices.json`
+  (features) and `signals.json` (labels) every 15s and flushes on SIGINT.
+  Accepted signals are logged as `[VALID_SIGNAL]` JSON; rejected ones as
+  `[SIGNAL_FILTER] Signal discarded: ...`.
 - `inference/app.py` -- PHASE 2 FastAPI service. `POST /predict` returns
   `{probability (0-1), direction (1|0)}`; `GET /health`; `POST /reload`. Returns
   HTTP 503 (never a fabricated probability) when no model is loaded.
@@ -135,3 +143,8 @@ Inference env vars: `INFERENCE_URL` (unset = collection-only, no predictions),
   `model.pkl` is gitignored and must be trained locally.
 - **Predictions do not drive trades.** Nothing consumes them yet; they are
   logged and surfaced on `/health`. No execution/risk layer exists.
+- **Phase 3 (signal quality filters) implemented 2026-09-19** in
+  `signalFilter.ts`, wired into the `capture.ts` consumer loop. Rejections are
+  normal operation. Verified with a 22-check harness covering the no-trade zone
+  boundaries (0.36/0.64 inclusive), the volatility boundary (0.02 inclusive),
+  direction mapping and the confidence symmetry `max(P, 1-P)`.

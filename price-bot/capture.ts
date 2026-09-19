@@ -1,15 +1,22 @@
 #!/usr/bin/env tsx
 /**
- * Live Price Capture + Feature/Label Collection — entrypoint
- * ==========================================================
+ * Live Price Capture + Feature/Label Collection + Signal Filtering — entrypoint
+ * ============================================================================
  * Connects to Pocket Option over the authenticated Socket.IO WebSocket, streams
- * real-time OTC ticks, and builds candles. On top of that, the Phase 1
- * feature/label collector turns the feed into a supervised-learning dataset:
+ * real-time OTC ticks, and builds candles. On top of that:
  *
+ *   1. the feature/label collector turns the feed into a supervised-learning
+ *      dataset; and
+ *   2. each closed 60s window is scored by the ML service, then gated by the
+ *      Phase 3 quality filters before any signal is surfaced.
+ *
+ * Outputs:
  *   - 60s rolling feature windows per asset  -> `live-prices.json`
  *   - binary outcome labels resolved 60s later -> `signals.json`
+ *   - premium signals only (post-filter)      -> `[VALID_SIGNAL]` log
  *
- * There is NO strategy decisioning, risk, execution, or ML code here.
+ * There is NO execution, risk, or order-placement logic here — this is
+ * strictly a signal generator.
  *
  * Usage:
  *   npx tsx capture.ts                 # 1m windows
@@ -25,6 +32,7 @@ import {
   type PredictionResult,
   type StrategyContext,
 } from './strategy.js';
+import { evaluateSignal, type ValidSignal } from './signalFilter.js';
 import * as fs from 'fs';
 import * as http from 'http';
 
@@ -94,6 +102,9 @@ async function main() {
   // standalone with no Python service present.
   const inference = new InferenceClient();
   const predictions: Record<string, PredictionResult> = {};
+  /** Most recent signal that cleared every filter, per asset. */
+  const validSignals: Record<string, ValidSignal> = {};
+  let rejectedSignals = 0;
 
   collector.onBucketBoundary((asset: string, features: FeatureWindow) => {
     // Fire-and-forget: the async request must not block the evaluate loop.
@@ -106,6 +117,18 @@ async function main() {
           `[INFER] ${asset} P(UP)=${result.probability.toFixed(4)} ` +
             `-> ${result.direction === 1 ? 'UP(1)' : 'DOWN(0)'}`
         );
+
+        // Phase 3: gate the raw prediction before it reaches any consumer.
+        // A rejection is normal operation, not an error.
+        const outcome = evaluateSignal(result, features);
+        if (!outcome.accepted) {
+          rejectedSignals++;
+          console.log(`[SIGNAL_FILTER] Signal discarded: ${outcome.detail}`);
+          return;
+        }
+
+        validSignals[asset] = outcome.signal;
+        console.log(`[VALID_SIGNAL] ${JSON.stringify(outcome.signal)}`);
       });
   });
 
@@ -154,7 +177,10 @@ async function main() {
     const inf = inference.getStats();
     console.log(
       `[COLLECT] labels=${s.labels} pending=${s.pending} assets=${s.assets} skipped=${s.skipped}` +
-        (inf.enabled ? ` | predictions ok=${inf.successes} failed=${inf.failures}` : '')
+        (inf.enabled
+          ? ` | predictions ok=${inf.successes} failed=${inf.failures}` +
+            ` | signals accepted=${Object.keys(validSignals).length} rejected=${rejectedSignals}`
+          : '')
     );
   }, 15000);
 
@@ -177,6 +203,8 @@ async function main() {
         candlePeriod: `${candlePeriod}s`,
         inference: inference.getStats(),
         predictions,
+        validSignals,
+        rejectedSignals,
         timestamp: Date.now(),
       }));
     } else {
