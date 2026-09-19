@@ -1,22 +1,25 @@
 #!/usr/bin/env tsx
 /**
- * Live Price Capture — entrypoint
- * ===============================
+ * Live Price Capture + Feature/Label Collection — entrypoint
+ * ==========================================================
  * Connects to Pocket Option over the authenticated Socket.IO WebSocket, streams
- * real-time OTC ticks, and builds candles. This is pure market-data capture:
- * there is NO strategy, risk, execution, or paper-trading layer here.
+ * real-time OTC ticks, and builds candles. On top of that, the Phase 1
+ * feature/label collector turns the feed into a supervised-learning dataset:
  *
- * The `PocketOptionPriceBot` (server.ts) is the reusable capture engine. An ML
- * pipeline consumes it via `getCandles()` / `getPrice()` / `getTicks()` /
- * `onCandle` / `onTick`, or by tailing `live-prices.json`.
+ *   - 60s rolling feature windows per asset  -> `live-prices.json`
+ *   - binary outcome labels resolved 60s later -> `signals.json`
+ *
+ * There is NO strategy decisioning, risk, execution, or ML code here.
  *
  * Usage:
- *   npx tsx capture.ts                 # 1m candles
+ *   npx tsx capture.ts                 # 1m windows
  *   npx tsx capture.ts --period 180    # 3m candles
  *   PERIOD=300 npx tsx capture.ts      # via env (used by Render)
  */
 
 import { PocketOptionPriceBot } from './server.js';
+import { FeatureLabelCollector, type StrategyContext } from './strategy.js';
+import * as fs from 'fs';
 import * as http from 'http';
 
 const DEFAULT_ASSETS = [
@@ -52,8 +55,6 @@ async function main() {
 
   const bot = new PocketOptionPriceBot({
     verbose: false,
-    saveToFile: true,
-    outputFile: './live-prices.json',
     defaultAssets: DEFAULT_ASSETS,
     candlePeriod,
   });
@@ -75,6 +76,57 @@ async function main() {
   );
 
   await bot.connect();
+
+  // --- Phase 1: feature/label collector -------------------------------
+  const collector = new FeatureLabelCollector({
+    featuresFile: './live-prices.json',
+    signalsFile: './signals.json',
+  });
+
+  /**
+   * Drive one collector cycle per asset: stream the engine's tick history and
+   * current candles into the collector via the Strategy context.
+   */
+  const collectAll = () => {
+    for (const a of bot.getAssetList()) {
+      const price = bot.getPrice(a.id);
+      if (!(price > 0)) continue;
+      const ctx: StrategyContext = {
+        price,
+        candles: bot.getCandles(a.id),
+        ticks: bot.getTickHistory(a.id),
+        serverTime: bot.getServerTime(),
+      };
+      collector.evaluate(ctx, a.id);
+    }
+  };
+
+  const collectTimer = setInterval(collectAll, 1000);
+
+  // --- Periodic output: real-time features + append-only labels --------
+  const writeOutputs = () => {
+    const now = bot.getServerTime();
+    try {
+      fs.writeFileSync(
+        './live-prices.json',
+        JSON.stringify(collector.getFeatureSnapshot(now), null, 2)
+      );
+    } catch (e) {
+      console.error(`[COLLECT] feature write failed: ${(e as Error).message}`);
+    }
+    try {
+      fs.writeFileSync('./signals.json', JSON.stringify(collector.getLabels(), null, 2));
+    } catch (e) {
+      console.error(`[COLLECT] label write failed: ${(e as Error).message}`);
+    }
+  };
+
+  const writeTimer = setInterval(() => {
+    collectAll();     // ensure features are current before snapshotting
+    writeOutputs();
+    const s = collector.getStats();
+    console.log(`[COLLECT] labels=${s.labels} pending=${s.pending} assets=${s.assets} skipped=${s.skipped}`);
+  }, 15000);
 
   // --- Health endpoint (Render platform health checks) ---
   const PORT = Number(process.env.PORT) || 10000;
@@ -114,15 +166,15 @@ async function main() {
     console.log(`[STATUS] ticks=${tickCount} connected=${bot.isConnected()} candles=[${candleTotals}]`);
   }, 15000);
 
-  // --- Periodic snapshot to live-prices.json (for offline / ML use) ---
-  const saveTimer = setInterval(() => {
-    if (bot.isConnected()) bot.savePricesToFile();
-  }, 30000);
-
   process.on('SIGINT', () => {
     console.log('\n\nShutting down...');
+    collectAll();
+    writeOutputs(); // flush current features + labels before exit
+    const s = collector.getStats();
+    console.log(`[COLLECT] final: labels=${s.labels} pending=${s.pending} assets=${s.assets}`);
     clearInterval(statusTimer);
-    clearInterval(saveTimer);
+    clearInterval(collectTimer);
+    clearInterval(writeTimer);
     healthServer.close();
     bot.disconnect();
     process.exit(0);

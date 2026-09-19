@@ -25,11 +25,12 @@ npx tsx capture.ts --period 300     # 5-minute candles
 ## Architecture
 
 - `server.ts` — live price-capture engine (`PocketOptionPriceBot`)
-- `capture.ts` — entrypoint: starts capture + `/health` HTTP server
+- `strategy.ts` — Phase 1 feature/label collector (`FeatureLabelCollector`)
+- `capture.ts` — entrypoint: capture + collector + `/health` HTTP server
 
-No trading logic exists here. There is no strategy, risk, execution, signal, or
-paper-trading code. An ML pipeline consumes this feed via the engine's API
-(`getCandles`, `getPrice`, `getTicks`, `onTick`, `onCandle`).
+There is no trading logic here (no strategy decisioning, risk, execution, or
+paper-trading). The collector turns the feed into a supervised-learning dataset:
+60s trailing feature windows plus binary labels resolved 60s later.
 
 # Supported OTC Pairs
 
