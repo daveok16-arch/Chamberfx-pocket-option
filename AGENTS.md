@@ -29,13 +29,22 @@ future execution path must be added deliberately, with its own safety design.
   timestamp+direction), `getServerTime()`, `isConnected()`,
   `savePricesToFile()`. Self-contained `main()` (capture-only) runs when
   executed directly.
-- `price-bot/strategy.ts` -- PHASE 1 feature/label collector. Defines the
-  `Strategy` contract (`evaluate(ctx, asset)`) plus `FeatureLabelCollector`,
-  which consumes the feed and emits a supervised-learning dataset. It NEVER
-  proposes a trade (always returns null). No ML/model code exists yet.
-- `price-bot/capture.ts` -- entrypoint: capture + collector loop + `/health`
-  HTTP server for Render. Writes `live-prices.json` (features) and
+- `price-bot/strategy.ts` -- PHASE 1 feature/label collector + inference client.
+  Defines the `Strategy` contract (`evaluate(ctx, asset)`), the
+  `FeatureLabelCollector` (emits the supervised-learning dataset; never proposes
+  a trade), and `InferenceClient` (POSTs feature windows to the Python service).
+- `price-bot/capture.ts` -- entrypoint: capture + collector loop + inference at
+  bucket boundaries + `/health`. Writes `live-prices.json` (features) and
   `signals.json` (labels) every 15s and flushes on SIGINT.
+- `inference/app.py` -- PHASE 2 FastAPI service. `POST /predict` returns
+  `{probability (0-1), direction (1|0)}`; `GET /health`; `POST /reload`. Returns
+  HTTP 503 (never a fabricated probability) when no model is loaded.
+- `inference/train.py` -- fits a RandomForestClassifier on `signals.json` and
+  writes `model.pkl`. Refuses to train below 200 rows (`--min-rows` to override
+  for smoke tests) and warns that metrics below 1000 rows are noisy.
+- `inference/features.py` -- shared feature contract (14 columns). Magnitudes
+  are normalised by the window's `open` price; raw price levels are excluded so
+  the model cannot split on asset identity.
 - `Dockerfile` (repo ROOT) -- Render deploys Docker from the root. Base
   `mcr.microsoft.com/playwright` (Node + chromium). Runs
   `tsx capture.ts`. Exposes port 10000, HEALTHCHECK on `/health`.
@@ -73,7 +82,16 @@ npx tsc --noEmit                  # typecheck (must be exit 0)
 npx tsx capture.ts                # live capture, 1m candles + /health
 npx tsx capture.ts --period 180   # (or PERIOD=180)
 npx tsx server.ts                 # engine's own demo main
+
+cd ../inference
+pip install -r requirements.txt
+uvicorn app:app --port 8000                      # serve /predict
+python train.py --data ../price-bot/signals.json # fit model.pkl
 ```
+
+Inference env vars: `INFERENCE_URL` (unset = collection-only, no predictions),
+`INFERENCE_TIMEOUT_MS` (5000), `MODEL_FILE` (./model.pkl),
+`MODEL_AUTO_RELOAD` (1), `PREDICTION_THRESHOLD` (0.5).
 
 ## Data interfaces (from server.ts)
 - `Tick {assetId,price,timestamp,direction}`
@@ -109,4 +127,11 @@ npx tsx server.ts                 # engine's own demo main
   `strategy.ts`, wired through `capture.ts`. Emits `live-prices.json`
   (real-time 60s features) and `signals.json` (binary labels resolved 60s
   later). Verified live: 1 observation per asset per 60s bucket, ~120 ticks
-  per window, balanced label split. No ML/model code yet — that is Phase 2.
+  per window, balanced label split.
+- **Phase 2 (training + inference) implemented 2026-09-19** under `inference/`.
+  FastAPI `/predict` scores each closed bucket; the TS engine POSTs the feature
+  window at bucket boundaries when `INFERENCE_URL` is set. Verified end-to-end
+  live: TS -> /predict -> true probability + direction. NO model is committed;
+  `model.pkl` is gitignored and must be trained locally.
+- **Predictions do not drive trades.** Nothing consumes them yet; they are
+  logged and surfaced on `/health`. No execution/risk layer exists.

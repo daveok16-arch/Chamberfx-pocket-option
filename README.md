@@ -28,9 +28,15 @@ be built on a clean slate. What remains is a verified live feed plus a small
 ```
 price-bot/
   server.ts            Live price-capture engine (Playwright + WebSocket)
-  strategy.ts          Feature/label collector (Phase 1 data engine)
-  capture.ts           Entrypoint: capture + collector + /health
+  strategy.ts          Feature/label collector + inference client
+  capture.ts           Entrypoint: capture + collector + inference + /health
   tsconfig.json        TypeScript config
+inference/
+  app.py               FastAPI service: /predict /health /reload
+  train.py             Trains model.pkl from signals.json
+  features.py          Shared feature contract (train + serve)
+  requirements.txt     Python dependencies
+  README.md            Inference service docs
 Dockerfile             (repo root) Render.com deployment image
 render.yaml            (repo root) Render blueprint
 ```
@@ -60,11 +66,40 @@ PERIOD=180 npx tsx capture.ts
 
 ---
 
-## Building the ML pipeline
+## ML pipeline (Phases 1 + 2)
 
-Phase 1 (a feature/label collector) is implemented in `price-bot/strategy.ts`.
-It turns the live feed into a supervised-learning dataset and proposes no
-trades. Phase 2 (the model) has not been written yet.
+**Phase 1 — data collection** (`price-bot/strategy.ts`): turns the live feed into
+a supervised-learning dataset. Proposes no trades.
+
+**Phase 2 — training + inference** (`inference/`): a FastAPI service that fits a
+RandomForestClassifier on the collected dataset and serves live probabilities.
+
+```
+price-bot/capture.ts                     inference/
+   │  POST /predict {asset, features}        │
+   └───────────────────────────────────────►├── app.py       FastAPI /predict
+                                            ├── train.py     fits model.pkl
+                                            ├── features.py  shared contract
+                                            └── model.pkl    weights (gitignored)
+```
+
+### Running it
+
+```bash
+# 1) inference service
+cd inference && pip install -r requirements.txt
+uvicorn app:app --host 0.0.0.0 --port 8000
+
+# 2) collector (with predictions enabled)
+cd price-bot
+INFERENCE_URL=http://localhost:8000 npx tsx capture.ts
+
+# 3) train once enough rows exist
+cd inference && python train.py --data ../price-bot/signals.json
+```
+
+`/predict` returns HTTP **503** until a model is trained — it never fabricates a
+probability. With `INFERENCE_URL` unset, the collector runs standalone.
 
 ### What the collector emits
 

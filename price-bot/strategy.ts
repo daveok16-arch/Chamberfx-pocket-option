@@ -131,6 +131,107 @@ export interface CollectorConfig {
   signalsFile: string;
 }
 
+/** Result of scoring one feature window against the Python inference service. */
+export interface PredictionResult {
+  asset: string;
+  /** Model probability of an UP outcome (0.0 - 1.0). */
+  probability: number;
+  /** Discretised direction: 1 = UP, 0 = DOWN. */
+  direction: 0 | 1;
+  /** Decision threshold the service applied. */
+  threshold: number;
+}
+
+/**
+ * Client for the Python inference service (`inference/app.py`).
+ *
+ * Fire-and-forget by design: /predict is a best-effort side channel, and a
+ * slow or down service must never stall the capture/collection loop.
+ */
+export class InferenceClient {
+  private readonly url: string;
+  private readonly timeoutMs: number;
+  private readonly enabled: boolean;
+  /** Most recent prediction per asset (for /health and logging). */
+  private readonly latest = new Map<string, PredictionResult>();
+  private failures = 0;
+  private successes = 0;
+
+  constructor(opts: { url?: string; timeoutMs?: number } = {}) {
+    this.url = (opts.url ?? process.env.INFERENCE_URL ?? '').replace(/\/+$/, '');
+    this.timeoutMs = opts.timeoutMs ?? Number(process.env.INFERENCE_TIMEOUT_MS ?? 5000);
+    this.enabled = this.url.length > 0;
+    if (this.enabled) {
+      console.log(`[INFER] predictions enabled -> ${this.url}`);
+    } else {
+      console.log('[INFER] INFERENCE_URL unset — running collection-only (no predictions)');
+    }
+  }
+
+  isEnabled(): boolean {
+    return this.enabled;
+  }
+
+  /**
+   * Score one asset's feature window.
+   * @returns the prediction, or null when disabled/unreachable (never throws).
+   */
+  async predict(asset: string, features: FeatureWindow): Promise<PredictionResult | null> {
+    if (!this.enabled) return null;
+
+    try {
+      const res = await fetch(`${this.url}/predict`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ asset, features }),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+
+      if (!res.ok) {
+        this.failures++;
+        // 503 = no model trained yet. Expected early on; not a hard error.
+        if (res.status === 503) {
+          console.log('[INFER] no trained model yet (503) — collect more observations');
+        } else {
+          console.error(`[INFER] ${asset} HTTP ${res.status}`);
+        }
+        return null;
+      }
+
+      const body = (await res.json()) as PredictionResult;
+      // Guard the boundary: a malformed number here would propagate as NaN.
+      if (typeof body.probability !== 'number' || !Number.isFinite(body.probability)) {
+        this.failures++;
+        console.error(`[INFER] ${asset} malformed probability: ${JSON.stringify(body)}`);
+        return null;
+      }
+
+      this.successes++;
+      const result: PredictionResult = {
+        asset,
+        probability: body.probability,
+        direction: body.direction === 1 ? 1 : 0,
+        threshold: body.threshold,
+      };
+      this.latest.set(asset, result);
+      return result;
+    } catch (e) {
+      // Network error / timeout. Counted, not thrown.
+      this.failures++;
+      console.error(`[INFER] ${asset} request failed: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  getLatest(asset: string): PredictionResult | undefined {
+    return this.latest.get(asset);
+  }
+
+  getStats(): { successes: number; failures: number; enabled: boolean } {
+    return { successes: this.successes, failures: this.failures, enabled: this.enabled };
+  }
+}
+
 /**
  * Phase 1 collector: implements `Strategy` purely to consume the live feed.
  *
@@ -161,6 +262,10 @@ export class FeatureLabelCollector implements Strategy {
   private labels: LabelRecord[] = [];
   /** Per-asset count of windows skipped for insufficient tick coverage. */
   private skipped = new Map<string, number>();
+  /** Invoked once per bucket boundary with the freshly-armed window. */
+  private onBucketClose:
+    | ((asset: string, features: FeatureWindow, entryPrice: number) => void)
+    | null = null;
 
   constructor(cfg: Partial<CollectorConfig> = {}) {
     this.cfg = {
@@ -170,6 +275,18 @@ export class FeatureLabelCollector implements Strategy {
       featuresFile: cfg.featuresFile ?? './live-prices.json',
       signalsFile: cfg.signalsFile ?? './signals.json',
     };
+  }
+
+  /**
+   * Register a callback fired at each 60s bucket boundary, after the window is
+   * armed. This is the hook the inference path uses to score the just-closed
+   * window without polling. The callback must not throw (it is invoked inside
+   * the evaluate loop).
+   */
+  onBucketBoundary(
+    cb: (asset: string, features: FeatureWindow, entryPrice: number) => void
+  ): void {
+    this.onBucketClose = cb;
   }
 
   evaluate(ctx: StrategyContext, asset: string): StrategySignal | null {
@@ -199,6 +316,16 @@ export class FeatureLabelCollector implements Strategy {
           entryPrice: ctx.price,
           features,
         });
+
+        // Bucket boundary reached: hand the freshly-closed window to the
+        // inference path. Wrapped so a callback error can't break collection.
+        if (this.onBucketClose) {
+          try {
+            this.onBucketClose(asset, features, ctx.price);
+          } catch (e) {
+            console.error(`[COLLECT] bucket callback failed for ${asset}: ${(e as Error).message}`);
+          }
+        }
       } else {
         // Not enough history yet (e.g. just after reconnect) — skip rather than
         // emit a label built on a near-empty window.

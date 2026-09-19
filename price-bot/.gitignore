@@ -6,3 +6,10 @@ dist/
 live-prices.json
 signals.json
 prices.json
+
+# Python / ML
+__pycache__/
+*.pyc
+.venv/
+venv/
+model.pkl
