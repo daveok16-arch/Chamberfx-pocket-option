@@ -29,7 +29,8 @@ be built on a clean slate. What remains is a verified live feed plus a small
 price-bot/
   server.ts            Live price-capture engine (Playwright + WebSocket)
   strategy.ts          Feature/label collector + inference client
-  capture.ts           Entrypoint: capture + collector + inference + /health
+  signalFilter.ts      Signal quality filters + confidence guardrails
+  capture.ts           Entrypoint: capture + collector + inference + filtering
   tsconfig.json        TypeScript config
 inference/
   app.py               FastAPI service: /predict /health /reload
@@ -66,7 +67,7 @@ PERIOD=180 npx tsx capture.ts
 
 ---
 
-## ML pipeline (Phases 1 + 2)
+## ML pipeline (Phases 1-3)
 
 **Phase 1 — data collection** (`price-bot/strategy.ts`): turns the live feed into
 a supervised-learning dataset. Proposes no trades.
@@ -74,14 +75,45 @@ a supervised-learning dataset. Proposes no trades.
 **Phase 2 — training + inference** (`inference/`): a FastAPI service that fits a
 RandomForestClassifier on the collected dataset and serves live probabilities.
 
+**Phase 3 — signal quality filters** (`price-bot/signalFilter.ts`): gates each
+raw prediction so only premium, high-confidence signals are surfaced. This is
+strictly a signal generator — nothing executes trades.
+
 ```
 price-bot/capture.ts                     inference/
    │  POST /predict {asset, features}        │
    └───────────────────────────────────────►├── app.py       FastAPI /predict
-                                            ├── train.py     fits model.pkl
-                                            ├── features.py  shared contract
-                                            └── model.pkl    weights (gitignored)
+        │                                   ├── train.py     fits model.pkl
+        ▼                                   ├── features.py  shared contract
+   signalFilter.ts  (confidence + volatility)└── model.pkl    weights (gitignored)
+        │
+        ├─ reject -> [SIGNAL_FILTER] Signal discarded: ...
+        └─ accept -> [VALID_SIGNAL] {timestamp, asset, direction, confidence}
 ```
+
+### Filter rules
+
+| Rule | Threshold | Behaviour |
+|---|---|---|
+| `MIN_CONFIDENCE_THRESHOLD` | `0.65` | reject unless confidence ≥ 0.65 |
+| `MAX_SPREAD_VOLATILITY_PCT` | `0.02` | reject when `(high-low)/open > 0.02` |
+| No-Trade Zone | `P ∈ [0.36, 0.64]` | reject as ambiguous |
+
+**Confidence means `max(P, 1-P)`**, not `P`. A model that is 90% sure of DOWN
+reports `P(UP) = 0.10`; that is a *high*-confidence PUT, so its confidence is
+0.90, not 0.10. Scoring it as 0.10 would discard the model's best calls and
+keep its coin flips.
+
+Both the confidence floor and the no-trade zone are applied, so the stricter
+check always wins. The zone additionally rejects the thin slices `(0.35, 0.36)`
+and `(0.64, 0.65)`.
+
+A window rejected for volatility means its 60s range was abnormally wide —
+usually news or illiquidity, where the feature distribution the model learned
+no longer describes the current regime.
+
+Accepted signals are printed as structured JSON and exposed on `/health` under
+`validSignals`; a running `rejectedSignals` count is included alongside.
 
 ### Running it
 
@@ -90,7 +122,7 @@ price-bot/capture.ts                     inference/
 cd inference && pip install -r requirements.txt
 uvicorn app:app --host 0.0.0.0 --port 8000
 
-# 2) collector (with predictions enabled)
+# 2) collector (with predictions + filtering enabled)
 cd price-bot
 INFERENCE_URL=http://localhost:8000 npx tsx capture.ts
 
@@ -99,7 +131,8 @@ cd inference && python train.py --data ../price-bot/signals.json
 ```
 
 `/predict` returns HTTP **503** until a model is trained — it never fabricates a
-probability. With `INFERENCE_URL` unset, the collector runs standalone.
+probability, and there is no 0.50 fallback. With `INFERENCE_URL` unset, the
+collector runs standalone.
 
 ### What the collector emits
 
