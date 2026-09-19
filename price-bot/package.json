@@ -1,7 +1,7 @@
 {
   "name": "pocket-option-price-capture",
   "version": "1.0.0",
-  "description": "Pocket Option OTC live price capture foundation (ticks + candles) for an AI/ML prediction pipeline",
+  "description": "Pocket Option OTC live capture + Phase 1 feature/label collector for an AI/ML prediction pipeline",
   "type": "module",
   "scripts": {
     "start": "tsx capture.ts",

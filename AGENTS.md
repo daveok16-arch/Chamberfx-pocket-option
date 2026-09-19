@@ -25,11 +25,17 @@ future execution path must be added deliberately, with its own safety design.
   Exports `PocketOptionPriceBot` with multi-listener callbacks
   (onTick/onCandle/onConnect/onDisconnect/onError/...).
   `getCandles(assetId)`, `getPrice(assetId)`, `getTicks(assetId)`,
-  `getPrices()`, `getAssetList()`, `getServerTime()`, `isConnected()`,
+  `getPrices()`, `getAssetList()`, `getTickHistory(assetId)` (Tick[] with
+  timestamp+direction), `getServerTime()`, `isConnected()`,
   `savePricesToFile()`. Self-contained `main()` (capture-only) runs when
   executed directly.
-- `price-bot/capture.ts` -- entrypoint: starts capture + a `/health` HTTP
-  server for Render. No trading logic.
+- `price-bot/strategy.ts` -- PHASE 1 feature/label collector. Defines the
+  `Strategy` contract (`evaluate(ctx, asset)`) plus `FeatureLabelCollector`,
+  which consumes the feed and emits a supervised-learning dataset. It NEVER
+  proposes a trade (always returns null). No ML/model code exists yet.
+- `price-bot/capture.ts` -- entrypoint: capture + collector loop + `/health`
+  HTTP server for Render. Writes `live-prices.json` (features) and
+  `signals.json` (labels) every 15s and flushes on SIGINT.
 - `Dockerfile` (repo ROOT) -- Render deploys Docker from the root. Base
   `mcr.microsoft.com/playwright` (Node + chromium). Runs
   `tsx capture.ts`. Exposes port 10000, HEALTHCHECK on `/health`.
@@ -37,6 +43,26 @@ future execution path must be added deliberately, with its own safety design.
   `healthCheckPath: /health`, `PERIOD` env var (60|180|300).
 - `price-bot/package.json` -- scripts: `start`/`render:start`/`capture` →
   capture.ts, `typecheck`/`build` (tsc), `postinstall` → playwright install.
+
+## Phase 1: feature/label collector (implemented)
+No ML code exists yet. `strategy.ts` collects the supervised-learning dataset:
+
+- **Feature window:** trailing 60s per asset. Fields: `tickCount, open, close,
+  high, low, netChange, netChangePct, range, avgAbsDelta, stdDev, upRatio,
+  windowSpanSec, momentum60s`. Written live to `live-prices.json`.
+- **Label:** the price 60s later vs the entry price. `label` is binary
+  (1 = UP, 0 = DOWN); ties (delta === 0) resolve to 0. Appended to
+  `signals.json` as `{type:'OBSERVATION', asset, entryAt, entryPrice,
+  resolvedAt, expirationPrice, delta, label, outcome, features, source}`.
+- **One observation per asset per aligned 60s bucket** (`entryAt = now` when
+  armed). The bucket boundary is a dedup key only — without it the 1s evaluate
+  loop would arm ~60 observations/min/asset and oversample one window.
+- **Windows with <50% tick coverage are skipped** (`minCoverage`), so
+  post-reconnect partial windows never produce junk labels. Surfaced as
+  `skipped=` in the `[COLLECT]` log.
+- Features slide continuously within the bucket; arming happens once per
+  bucket, so `windowSpanSec` is typically ~59s rather than exactly 60s.
+- Dedup of the overlapping `ctx.ticks` snapshots is by `(timestamp, price)`.
 
 ## Build / Run
 ```
@@ -79,3 +105,8 @@ npx tsx server.ts                 # engine's own demo main
   repo; an AI/ML predictor will be added on top of it deliberately.
 - `server.ts` shed the execution-only `send()`, `isDemoMode()`, and
   `setAuthPacketForTest()` helpers.
+- **Phase 1 (feature/label collector) implemented 2026-09-19** in
+  `strategy.ts`, wired through `capture.ts`. Emits `live-prices.json`
+  (real-time 60s features) and `signals.json` (binary labels resolved 60s
+  later). Verified live: 1 observation per asset per 60s bucket, ~120 ticks
+  per window, balanced label split. No ML/model code yet — that is Phase 2.

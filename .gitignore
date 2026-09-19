@@ -6,6 +6,7 @@ dist/
 # Runtime artifacts
 *.log
 live-prices.json
+signals.json
 prices.json
 
 # Environment

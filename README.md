@@ -28,7 +28,8 @@ be built on a clean slate. What remains is a verified live feed plus a small
 ```
 price-bot/
   server.ts            Live price-capture engine (Playwright + WebSocket)
-  capture.ts           Entrypoint: starts capture + /health (no trading logic)
+  strategy.ts          Feature/label collector (Phase 1 data engine)
+  capture.ts           Entrypoint: capture + collector + /health
   tsconfig.json        TypeScript config
 Dockerfile             (repo root) Render.com deployment image
 render.yaml            (repo root) Render blueprint
@@ -61,36 +62,70 @@ PERIOD=180 npx tsx capture.ts
 
 ## Building the ML pipeline
 
-The capture engine is the data source. Wrap it (or import `PocketOptionPriceBot`
-from `server.ts`) and read the feed:
+Phase 1 (a feature/label collector) is implemented in `price-bot/strategy.ts`.
+It turns the live feed into a supervised-learning dataset and proposes no
+trades. Phase 2 (the model) has not been written yet.
 
-```ts
-import { PocketOptionPriceBot } from './server.js';
+### What the collector emits
 
-const bot = new PocketOptionPriceBot({ candlePeriod: 60, /* ... */ });
+| File | Contents |
+|------|----------|
+| `live-prices.json` | Real-time feature snapshot — the latest trailing 60s window per asset |
+| `signals.json` | Completed, labelled observations — append-only array |
 
-bot.onCandle((candle) => {
-  // closed candle: { assetId, open, high, low, close, volume, openTime, closeTime }
-});
+Each **observation** pairs a trailing 60-second feature window with the
+outcome over the next 60 seconds:
 
-bot.onTick((tick) => {
-  // { assetId, price, timestamp, direction }
-});
-
-await bot.connect();
-
-// Pull-based access at any time:
-const candles = bot.getCandles('EURUSD_otc'); // oldest first
-const price = bot.getPrice('EURUSD_otc');
+```jsonc
+{
+  "type": "OBSERVATION",
+  "asset": "EURUSD_otc",
+  "entryAt": 1789863660010,        // server-clock ms; window/outcome boundary
+  "entryPrice": 1.15122,
+  "resolvedAt": 1789863720099,     // entryAt + 60s
+  "expirationPrice": 1.15126,      // market price at expiration
+  "delta": 0.00004,
+  "label": 1,                      // 1 = UP, 0 = DOWN (ties -> 0)
+  "outcome": "UP",
+  "features": { /* trailing 60s state at entry */ },
+  "source": "feature-label-collector"
+}
 ```
 
-The rule-based strategy/risk/execution layers were removed on 2026-09-19. There
-is no decision code in this repo anymore — add the predictor deliberately.
+Feature window fields: `tickCount`, `open`, `close`, `high`, `low`,
+`netChange`, `netChangePct`, `range`, `avgAbsDelta`, `stdDev`, `upRatio`,
+`windowSpanSec`, `momentum60s`.
 
-The engine also exposes `getTicks(assetId)`, `getAssetList()`, and
-`getServerTime()` (Pocket Option's clock — ~2h ahead of `Date.now()` on this
-host, so use it for any timing/window math). `live-prices.json` is written for
-offline use.
+### How it is wired
+
+`capture.ts` drives the collector once per second per asset, passing the
+engine's tick history and current price through the `Strategy` context:
+
+```ts
+const ctx: StrategyContext = {
+  price: bot.getPrice(assetId),
+  candles: bot.getCandles(assetId),
+  ticks: bot.getTickHistory(assetId),
+  serverTime: bot.getServerTime(),   // Pocket Option clock, never Date.now()
+};
+collector.evaluate(ctx, assetId);
+```
+
+### Behaviour worth knowing
+
+- **One observation per asset per 60s bucket.** The bucket boundary is only a
+  dedup key; without it the 1s evaluate loop would arm ~60 observations per
+  minute per asset and oversample the same window.
+- **Windows are skipped until ≥50% covered.** Right after (re)connect a window
+  may hold only a tick or two; those are dropped rather than emitting a label
+  built on a near-empty window (visible as `skipped=` in the logs).
+- **Windows slide within the bucket.** Features are collected continuously, but
+  arming happens once per bucket, so `windowSpanSec` is typically slightly
+  under 60s.
+- **Timing uses the server clock.** `entryAt`/`resolvedAt` come from
+  `bot.getServerTime()` (Pocket Option's clock, ~2h ahead of `Date.now()`), so
+  `resolvedAt - entryAt` is a true 60s.
+- **Ties resolve to `0` (DOWN).** At-the-strike is not a win for a binary option.
 
 ---
 
