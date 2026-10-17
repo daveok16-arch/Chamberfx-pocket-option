@@ -132,12 +132,13 @@ cd price-bot
 INFERENCE_URL=http://localhost:8000 npx tsx capture.ts
 ```
 
-With `INFERENCE_URL` unset the collector runs standalone — no Python service
-required, no predictions attempted.
+With `INFERENCE_URL` unset the bot does not call this service. It still
+predicts — using its built-in local baseline predictor instead — and every
+prediction is tagged `[BASE]` rather than `[ML]`.
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `INFERENCE_URL` | *(unset)* | base URL; predictions disabled when unset |
+| `INFERENCE_URL` | *(unset)* | base URL of this service; ML scoring disabled when unset (baseline is used) |
 | `INFERENCE_TIMEOUT_MS` | `5000` | per-request timeout |
 
 ## Honest limitations

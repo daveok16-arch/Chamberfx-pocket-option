@@ -177,9 +177,9 @@ export class InferenceClient implements Predictor {
     this.timeoutMs = opts.timeoutMs ?? Number(process.env.INFERENCE_TIMEOUT_MS ?? 5000);
     this.enabled = this.url.length > 0;
     if (this.enabled) {
-      console.log(`[INFER] predictions enabled -> ${this.url}`);
+      console.log(`[INFER] ML inference enabled -> ${this.url}`);
     } else {
-      console.log('[INFER] INFERENCE_URL unset — running collection-only (no predictions)');
+      console.log('[INFER] INFERENCE_URL unset — using local baseline predictor');
     }
   }
 
