@@ -153,21 +153,23 @@ async function main() {
   const collectTimer = setInterval(collectAll, 1000);
 
   // --- Periodic output: real-time features + append-only labels --------
+  // Writes are atomic (temp file + rename) so a crash mid-write can never
+  // truncate the dataset: readers either see the old file or the new one.
+  const writeAtomic = (file: string, contents: string) => {
+    const tmp = `${file}.tmp`;
+    try {
+      fs.writeFileSync(tmp, contents);
+      fs.renameSync(tmp, file);
+    } catch (e) {
+      console.error(`[COLLECT] write failed for ${file}: ${(e as Error).message}`);
+      try { fs.unlinkSync(tmp); } catch { /* best effort */ }
+    }
+  };
+
   const writeOutputs = () => {
     const now = bot.getServerTime();
-    try {
-      fs.writeFileSync(
-        './live-prices.json',
-        JSON.stringify(collector.getFeatureSnapshot(now), null, 2)
-      );
-    } catch (e) {
-      console.error(`[COLLECT] feature write failed: ${(e as Error).message}`);
-    }
-    try {
-      fs.writeFileSync('./signals.json', JSON.stringify(collector.getLabels(), null, 2));
-    } catch (e) {
-      console.error(`[COLLECT] label write failed: ${(e as Error).message}`);
-    }
+    writeAtomic('./live-prices.json', JSON.stringify(collector.getFeatureSnapshot(now), null, 2));
+    writeAtomic('./signals.json', JSON.stringify(collector.getLabels(), null, 2));
   };
 
   const writeTimer = setInterval(() => {
@@ -226,20 +228,39 @@ async function main() {
     console.log(`[STATUS] ticks=${tickCount} connected=${bot.isConnected()} candles=[${candleTotals}]`);
   }, 15000);
 
-  process.on('SIGINT', () => {
+  /**
+   * Flush state and exit cleanly. Idempotent: a second signal (or a SIGINT
+   * racing a SIGTERM) returns immediately instead of re-running the flush.
+   */
+  const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
     console.log('\n\nShutting down...');
-    collectAll();
-    writeOutputs(); // flush current features + labels before exit
-    const s = collector.getStats();
-    console.log(`[COLLECT] final: labels=${s.labels} pending=${s.pending} assets=${s.assets}`);
+    try {
+      collectAll();
+      writeOutputs(); // flush current features + labels before exit
+      const s = collector.getStats();
+      console.log(`[COLLECT] final: labels=${s.labels} pending=${s.pending} assets=${s.assets}`);
+    } catch (e) {
+      console.error(`[COLLECT] shutdown flush failed: ${(e as Error).message}`);
+    }
     clearInterval(statusTimer);
     clearInterval(collectTimer);
     clearInterval(writeTimer);
     healthServer.close();
     bot.disconnect();
     process.exit(0);
-  });
+  };
+
+  process.on('SIGINT', shutdown);
+  // Render/Docker stop containers with SIGTERM, not SIGINT. Without this the
+  // process dies without flushing and the last write interval (up to 15s) of
+  // observations is lost on every redeploy.
+  process.on('SIGTERM', shutdown);
 }
+
+let shuttingDown = false;
 
 main().catch((err) => {
   console.error('Fatal error:', err);

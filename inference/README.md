@@ -36,6 +36,36 @@ below **1000 rows** are noisy. This is deliberate: an under-fit model that
 returns confident-looking probabilities from a few dozen rows is worse than no
 model, because nothing downstream can tell the difference.
 
+### Validation methodology
+
+Observations are a time series of overlapping, autocorrelated 60-second windows.
+A shuffled train/test split therefore leaks — adjacent windows land on both
+sides of the split — and reports an optimistic score. Training instead:
+
+1. sorts by `entryAt` and splits **chronologically** (train = older, test = newer);
+2. **purges** training rows whose 60s label horizon overlaps the test period,
+   plus an `--embargo-ms` gap;
+3. optionally runs **expanding-window walk-forward** (`--walk-forward --folds N`)
+   and reports the AUC spread across folds;
+4. fits an **isotonic calibration** map on a purged slice, because a forest's
+   `predict_proba` is only "calibrated-ish" and the confidence gate acts on the
+   probability's magnitude;
+5. prints an **economic harness** — win rate and Wilson 95% CI for the
+   post-filter subset, against the payout break-even (`1 / (1 + payout)`).
+
+Accuracy is not the objective. At a 0.92 payout the break-even win rate is
+**0.5208**; the only meaningful number is the win rate of the signals that
+survive the filters, with an interval that says how much to trust it.
+
+```bash
+python train.py --walk-forward --folds 5          # walk-forward + economic harness
+python train.py --payout 0.92 --min-confidence 0.65
+```
+
+The artifact written to `model.pkl` is a `CalibratedModel` (forest + optional
+calibrator) from `model_bundle.py`, so `/predict` serves calibrated
+probabilities with no change to `app.py`.
+
 ## Serve
 
 ```bash

@@ -34,12 +34,14 @@ price-bot/
   tsconfig.json        TypeScript config
 inference/
   app.py               FastAPI service: /predict /health /reload
-  train.py             Trains model.pkl from signals.json
+  train.py             Trains model.pkl from signals.json (time-series validation)
   features.py          Shared feature contract (train + serve)
+  model_bundle.py      CalibratedModel artifact (forest + isotonic calibrator)
   requirements.txt     Python dependencies
   README.md            Inference service docs
 Dockerfile             (repo root) Render.com deployment image
 render.yaml            (repo root) Render blueprint
+.github/workflows/     CI: typecheck + tests + train smoke test
 ```
 
 ---

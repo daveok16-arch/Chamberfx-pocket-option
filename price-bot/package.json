@@ -8,6 +8,7 @@
     "render:start": "tsx capture.ts",
     "capture": "tsx capture.ts",
     "typecheck": "tsc --noEmit",
+    "test": "tsx tests/run.ts",
     "build": "tsc",
     "postinstall": "playwright install chromium --with-deps"
   },

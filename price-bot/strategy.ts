@@ -20,6 +20,7 @@
  */
 
 import type { Candle, Tick } from './server.js';
+import * as fs from 'fs';
 
 export type StrategyDirection = 'call' | 'put';
 
@@ -129,6 +130,13 @@ export interface CollectorConfig {
   featuresFile: string;
   /** Append-only labelled output file (default ./signals.json). */
   signalsFile: string;
+  /**
+   * Maximum number of completed labels held in memory (and therefore rewritten
+   * to `signalsFile`). Oldest observations are dropped first. Bounds memory and
+   * write cost on a long-running capture; without it the array grows forever.
+   * Default 200_000.
+   */
+  maxLabels: number;
 }
 
 /** Result of scoring one feature window against the Python inference service. */
@@ -260,6 +268,8 @@ export class FeatureLabelCollector implements Strategy {
   private lastEntryBucket = new Map<string, number>();
   /** All completed labels (kept in memory so the JSON array can be rewritten). */
   private labels: LabelRecord[] = [];
+  /** Dedup keys for loaded labels, so a re-read can never duplicate a record. */
+  private labelKeys = new Set<string>();
   /** Per-asset count of windows skipped for insufficient tick coverage. */
   private skipped = new Map<string, number>();
   /** Invoked once per bucket boundary with the freshly-armed window. */
@@ -274,7 +284,99 @@ export class FeatureLabelCollector implements Strategy {
       minCoverage: cfg.minCoverage ?? 0.5,
       featuresFile: cfg.featuresFile ?? './live-prices.json',
       signalsFile: cfg.signalsFile ?? './signals.json',
+      maxLabels: cfg.maxLabels ?? 200_000,
     };
+    this.loadExistingLabels();
+  }
+
+  /**
+   * Re-hydrate completed labels from `signalsFile` on startup.
+   *
+   * The collector owns the whole file (it is rewritten from the in-memory
+   * array on every flush), so without this a restart would truncate the
+   * dataset to whatever the current process happened to observe. Records are
+   * deduped by `asset + entryAt` — the same key the bucket dedup uses — so a
+   * re-read of an already-loaded file cannot create duplicates.
+   *
+   * A missing file is normal on first run. A malformed file is logged and
+   * ignored rather than crashing capture: losing history is bad, but refusing
+   * to start the feed is worse.
+   */
+  private loadExistingLabels(): void {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.cfg.signalsFile, 'utf8');
+    } catch {
+      return; // no prior dataset
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      console.error(
+        `[COLLECT] ${this.cfg.signalsFile} is not valid JSON (${(e as Error).message}); ` +
+          'starting with an empty dataset — existing file will be overwritten.'
+      );
+      return;
+    }
+
+    if (!Array.isArray(parsed)) {
+      console.error(`[COLLECT] ${this.cfg.signalsFile} is not a JSON array; ignoring it.`);
+      return;
+    }
+
+    let loaded = 0;
+    let dropped = 0;
+    for (const rec of parsed) {
+      if (!this.isValidLabelRecord(rec)) {
+        dropped++;
+        continue;
+      }
+      const key = `${rec.asset}:${rec.entryAt}`;
+      if (this.labelKeys.has(key)) continue;
+      this.labelKeys.add(key);
+      this.labels.push(rec);
+      loaded++;
+    }
+
+    this.labels.sort((a, b) => a.entryAt - b.entryAt);
+    this.trimLabels();
+
+    // Seed the bucket guard so the first evaluate() after a restart can't
+    // re-arm an observation for a bucket that already has a label.
+    for (const rec of this.labels) {
+      const bucket = Math.floor(rec.entryAt / this.cfg.windowMs) * this.cfg.windowMs;
+      const prev = this.lastEntryBucket.get(rec.asset);
+      if (prev === undefined || bucket > prev) this.lastEntryBucket.set(rec.asset, bucket);
+    }
+
+    console.log(
+      `[COLLECT] resumed ${loaded} label(s) from ${this.cfg.signalsFile}` +
+        (dropped ? ` (dropped ${dropped} malformed)` : '')
+    );
+  }
+
+  /** Structural check for a persisted label record. */
+  private isValidLabelRecord(rec: unknown): rec is LabelRecord {
+    if (!rec || typeof rec !== 'object') return false;
+    const r = rec as Partial<LabelRecord>;
+    return (
+      typeof r.asset === 'string' &&
+      typeof r.entryAt === 'number' &&
+      Number.isFinite(r.entryAt) &&
+      (r.label === 0 || r.label === 1) &&
+      !!r.features &&
+      typeof r.features === 'object'
+    );
+  }
+
+  /** Enforce the in-memory label cap, dropping the oldest observations first. */
+  private trimLabels(): void {
+    if (this.labels.length <= this.cfg.maxLabels) return;
+    const drop = this.labels.length - this.cfg.maxLabels;
+    const removed = this.labels.splice(0, drop);
+    for (const r of removed) this.labelKeys.delete(`${r.asset}:${r.entryAt}`);
   }
 
   /**
@@ -304,8 +406,14 @@ export class FeatureLabelCollector implements Strategy {
     // Arm at most ONE observation per aligned 60s bucket. The bucket boundary
     // is only a dedup key — each 1s evaluate cycle would otherwise arm a new
     // observation and oversample the window.
+    //
+    // Monotonic: only advance to a bucket strictly newer than the last one.
+    // A plain `!==` would re-arm every time server time moved backwards (clock
+    // re-sync, or a restart replaying a range already persisted), duplicating
+    // observations the dataset already contains.
     const bucket = Math.floor(now / this.cfg.windowMs) * this.cfg.windowMs;
-    if (this.lastEntryBucket.get(asset) !== bucket) {
+    const lastBucket = this.lastEntryBucket.get(asset);
+    if (lastBucket === undefined || bucket > lastBucket) {
       this.lastEntryBucket.set(asset, bucket);
 
       const spanMs = features.windowSpanSec * 1000;
@@ -457,8 +565,10 @@ export class FeatureLabelCollector implements Strategy {
         source: this.name,
       };
       this.labels.push(rec);
+      this.labelKeys.add(`${asset}:${o.entryAt}`);
       this.pending.splice(i, 1);
     }
+    this.trimLabels();
   }
 
   /** Real-time feature snapshot for all assets (written to featuresFile). */

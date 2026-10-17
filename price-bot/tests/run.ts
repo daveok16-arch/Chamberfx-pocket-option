@@ -1,0 +1,265 @@
+/**
+ * Test harness for the capture engine, feature collector, and signal filters.
+ *
+ * Run:  npm test        (from price-bot/)
+ *
+ * No test framework: a tiny assert helper keeps the dependency surface at zero
+ * and the suite runnable with the same `tsx` the app already uses. Each block
+ * guards a documented invariant that previously existed only in prose.
+ */
+
+import { PocketOptionPriceBot } from '../server.js';
+import type { Tick } from '../server.js';
+import { FeatureLabelCollector } from '../strategy.js';
+import {
+  computeConfidence,
+  computeRangePct,
+  evaluateSignal,
+  passesConfidence,
+  passesVolatility,
+  MIN_CONFIDENCE_THRESHOLD,
+  MAX_SPREAD_VOLATILITY_PCT,
+  NO_TRADE_ZONE_LOW,
+  NO_TRADE_ZONE_HIGH,
+} from '../signalFilter.js';
+import type { FeatureWindow, PredictionResult } from '../strategy.js';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
+let passed = 0;
+const failures: string[] = [];
+
+function check(name: string, cond: boolean): void {
+  if (cond) passed++;
+  else failures.push(name);
+}
+
+function section(name: string): void {
+  console.log(`\n${name}`);
+}
+
+function feat(over: Partial<FeatureWindow> = {}): FeatureWindow {
+  return {
+    lastTickAt: 1_789_863_660_010,
+    tickCount: 80,
+    open: 1.0,
+    close: 1.0,
+    high: 1.0,
+    low: 1.0,
+    netChange: 0,
+    netChangePct: 0,
+    range: 0,
+    avgAbsDelta: 0,
+    stdDev: 0,
+    upRatio: 0.5,
+    windowSpanSec: 59,
+    momentum60s: 0,
+    ...over,
+  };
+}
+
+function pred(probability: number, direction: 0 | 1): PredictionResult {
+  return { asset: 'EURUSD_otc', probability, direction, threshold: 0.5 };
+}
+
+// ============================================================
+section('signalFilter — confidence semantics and boundaries');
+// ============================================================
+check('confidence max(P,1-P) at 0.10', Math.abs(computeConfidence(0.1) - 0.9) < 1e-9);
+check('confidence max(P,1-P) at 0.90', Math.abs(computeConfidence(0.9) - 0.9) < 1e-9);
+check('confidence of 0.5 is 0.5', computeConfidence(0.5) === 0.5);
+check('confidence NaN -> 0.5', computeConfidence(NaN) === 0.5);
+check('confidence clamps above 1', computeConfidence(1.7) === 1);
+check('confidence clamps below 0', computeConfidence(-0.3) === 1);
+check('p=0.35 accepted (conf 0.65)', passesConfidence(0.35) === true);
+check('p=0.36 in no-trade zone rejected', passesConfidence(0.36) === false);
+check('p=0.64 in no-trade zone rejected', passesConfidence(0.64) === false);
+check('p=0.65 accepted', passesConfidence(0.65) === true);
+check('p=0.50 rejected', passesConfidence(0.5) === false);
+check('p=0.34 accepted (conf 0.66)', passesConfidence(0.34) === true);
+
+// ============================================================
+section('signalFilter — volatility boundary');
+// ============================================================
+check('rangePct exactly 0.02 passes', passesVolatility(feat({ open: 1, range: 0.02 })) === true);
+check('rangePct just over 0.02 fails', passesVolatility(feat({ open: 1, range: 0.0201 })) === false);
+check('open=0 yields rangePct 0', computeRangePct(feat({ open: 0, range: 5 })) === 0);
+check('open=NaN yields rangePct 0', computeRangePct(feat({ open: NaN, range: 5 })) === 0);
+check('negative range yields 0', computeRangePct(feat({ open: 1, range: -1 })) === 0);
+
+// ============================================================
+section('signalFilter — direction mapping and precedence');
+// ============================================================
+{
+  const up = evaluateSignal(pred(0.9, 1), feat({ open: 1, range: 0.001 }));
+  check('high-confidence UP -> CALL', up.accepted === true && up.signal.direction === 'CALL');
+  const down = evaluateSignal(pred(0.05, 0), feat({ open: 1, range: 0.001 }));
+  check('high-confidence DOWN -> PUT', down.accepted === true && down.signal.direction === 'PUT');
+  check('confidence reported is 0.95', down.accepted === true && Math.abs(down.signal.confidence - 0.95) < 1e-9);
+  const vol = evaluateSignal(pred(0.9, 1), feat({ open: 1, range: 0.5 }));
+  check('volatile window -> UNSTABLE_VOLATILITY', vol.accepted === false && vol.reason === 'UNSTABLE_VOLATILITY');
+  const low = evaluateSignal(pred(0.5, 1), feat({ open: 1, range: 0.5 }));
+  check('low confidence reported before volatility', low.accepted === false && low.reason === 'LOW_CONFIDENCE');
+}
+
+// ============================================================
+section('signalFilter — documented constants');
+// ============================================================
+check('MIN_CONFIDENCE_THRESHOLD = 0.65', MIN_CONFIDENCE_THRESHOLD === 0.65);
+check('MAX_SPREAD_VOLATILITY_PCT = 0.02', MAX_SPREAD_VOLATILITY_PCT === 0.02);
+check('no-trade zone is [0.36, 0.64]', NO_TRADE_ZONE_LOW === 0.36 && NO_TRADE_ZONE_HIGH === 0.64);
+
+// ============================================================
+section('candle engine — normalization, aggregation, dedup');
+// ============================================================
+{
+  const bot: any = new PocketOptionPriceBot({
+    defaultAssets: ['EURUSD_otc', 'XAUUSD_otc'],
+    candlePeriod: 60,
+    verbose: false,
+  });
+
+  check('normalize EURUSD -> EURUSD_otc', bot.normalizeAssetId('EURUSD') === 'EURUSD_otc');
+  check('normalize strips leading #', bot.normalizeAssetId('#EURUSD_otc') === 'EURUSD_otc');
+  check('normalize is case-insensitive', bot.normalizeAssetId('xauusd') === 'XAUUSD_otc');
+  check('unknown id returned unmapped', bot.normalizeAssetId('ZZZ') === 'ZZZ');
+
+  const t0 = 1_789_863_600_000;
+  bot.processTickData([['EURUSD_otc', t0 / 1000, 1.15]]);
+  check('array-format tick parsed', bot.getPrice('EURUSD_otc') === 1.15);
+  bot.processTickData([['EURUSD_otc', t0 / 1000 + 1, 1.1501]]);
+  const hist = bot.getTickHistory('EURUSD_otc');
+  check('tick direction UP computed', hist[hist.length - 1].direction === 'UP');
+  bot.processTickData([{ asset: 'XAUUSD_otc', price: 4340.5, time: t0 }]);
+  check('object-format tick parsed', bot.getPrice('XAUUSD_otc') === 4340.5);
+
+  const before = bot.getTickHistory('EURUSD_otc').length;
+  bot.processTickData([['EURUSD_otc', t0 / 1000 + 2, 0]]);
+  bot.processTickData([['EURUSD_otc', t0 / 1000 + 3, -5]]);
+  bot.processTickData([['', t0 / 1000 + 4, 1.2]]);
+  check('zero/negative/empty ticks ignored', bot.getTickHistory('EURUSD_otc').length === before);
+  bot.processTickData('not an array');
+  check('non-array payload does not throw', true);
+
+  const b = Math.floor(t0 / 60000) * 60000;
+  const c1 = bot.getCandles('EURUSD_otc')[0];
+  check('candle openTime aligned to period', c1.openTime === b);
+  check('candle closeTime = openTime + period - 1', c1.closeTime === b + 59999);
+  check('candle high >= low', c1.high >= c1.low);
+
+  bot.processTickData([['EURUSD_otc', (b + 60000) / 1000, 1.1505]]);
+  check('new bucket opens a new candle', bot.getCandles('EURUSD_otc').length === 2);
+
+  const h1 = [b / 1000, 1.15, 1.16, 1.14, 1.155, 10];
+  const h2 = [(b + 60000) / 1000, 1.155, 1.17, 1.15, 1.16, 12];
+  bot.processHistoryData(['EURUSD_otc', [h1, h2]]);
+  const afterFirst = bot.getCandles('EURUSD_otc').length;
+  bot.processHistoryData(['EURUSD_otc', [h1, h2]]); // reconnect replay
+  check('history dedup on reconnect', bot.getCandles('EURUSD_otc').length === afterFirst);
+
+  const sorted = bot.getCandles('EURUSD_otc');
+  check('candles sorted ascending', sorted.every((c: any, i: number) => i === 0 || c.openTime >= sorted[i - 1].openTime));
+
+  for (let i = 0; i < 250; i++) {
+    bot.processTickData([['EURUSD_otc', (b + (i + 10) * 60000) / 1000, 1.15 + i * 1e-5]]);
+  }
+  check('candles capped at 100', bot.getCandles('EURUSD_otc').length <= 100);
+
+  for (let i = 0; i < 1200; i++) {
+    bot.processTickData([['XAUUSD_otc', t0 / 1000 + i, 4340 + i]]);
+  }
+  check('tick history capped at 1000', bot.getTickHistory('XAUUSD_otc').length <= 1000);
+  check('getPrice unknown asset = 0', bot.getPrice('NOPE') === 0);
+}
+
+// ============================================================
+section('collector — windowing, bucket dedup, horizon resolution');
+// ============================================================
+{
+  const asset = 'EURUSD_otc';
+  const BASE = 1_789_863_600_000;
+
+  const drive = (col: FeatureLabelCollector, minutes: number, startMs: number) => {
+    let px = 1.15;
+    let serverMs = startMs;
+    const history: Tick[] = [];
+    const boundaries: number[] = [];
+    col.onBucketBoundary((_a, f) => boundaries.push(f.lastTickAt));
+    for (let s = 0; s < minutes * 60; s++) {
+      serverMs += 1000;
+      const next = px + Math.sin(s / 5) * 5e-5;
+      const dir: 'UP' | 'DOWN' = next > px ? 'UP' : 'DOWN';
+      px = next;
+      history.push({ assetId: asset, price: px, timestamp: serverMs, direction: dir });
+      col.evaluate({ price: px, candles: [], ticks: history.slice(-1000), serverTime: serverMs }, asset);
+    }
+    return { serverMs, boundaries };
+  };
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collector-'));
+  const sig = path.join(tmpDir, 'signals.json');
+  const featFile = path.join(tmpDir, 'live-prices.json');
+
+  const c1 = new FeatureLabelCollector({ signalsFile: sig, featuresFile: featFile });
+  const r1 = drive(c1, 3, BASE);
+  const n1 = c1.getLabels().length;
+  check('collector arms >= 2 labels over 3 min', n1 >= 2);
+  check('at most one arm per 60s bucket', r1.boundaries.length <= 4);
+  check('every label horizon is >= 60s', c1.getLabels().every((l) => l.resolvedAt - l.entryAt >= 60000));
+  {
+    const buckets = c1.getLabels().map((l) => Math.floor(l.entryAt / 60000));
+    check('label buckets unique', new Set(buckets).size === buckets.length);
+  }
+
+  // Persistence: a new collector resumes the file instead of truncating it.
+  fs.writeFileSync(sig, JSON.stringify(c1.getLabels(), null, 2));
+  const c2 = new FeatureLabelCollector({ signalsFile: sig, featuresFile: featFile });
+  check('collector resumes labels from disk', c2.getLabels().length === n1);
+  const r2 = drive(c2, 3, r1.serverMs);
+  check('collector appends after resume', c2.getLabels().length > n1);
+  {
+    const keys = c2.getLabels().map((l) => `${l.asset}:${l.entryAt}`);
+    check('no duplicate (asset, entryAt)', new Set(keys).size === keys.length);
+  }
+  {
+    const times = c2.getLabels().map((l) => l.entryAt);
+    check('labels sorted by entryAt', times.every((t, i) => i === 0 || t >= times[i - 1]));
+  }
+
+  // Replaying an already-covered range must not re-arm (monotonic bucket guard).
+  const covered = c2.getLabels().length;
+  drive(c2, 3, BASE);
+  check('no re-arm of already-labelled buckets', c2.getLabels().length === covered);
+
+  // Cap enforcement.
+  const many = Array.from({ length: 50 }, (_, i) => ({
+    type: 'OBSERVATION', asset, entryAt: BASE + i * 60000, entryPrice: 1.15,
+    resolvedAt: BASE + i * 60000 + 60000, expirationPrice: 1.1501, delta: 1e-4,
+    label: 1 as const, outcome: 'UP' as const, features: feat(), source: 'x',
+  }));
+  fs.writeFileSync(sig, JSON.stringify(many));
+  const capped = new FeatureLabelCollector({ signalsFile: sig, featuresFile: featFile, maxLabels: 10 });
+  check('maxLabels trims the array', capped.getLabels().length === 10);
+  check('maxLabels keeps the newest', capped.getLabels()[9].entryAt === BASE + 49 * 60000);
+
+  // Malformed input is tolerated, never fatal.
+  fs.writeFileSync(sig, '{ not json');
+  check('corrupt signals.json tolerated', new FeatureLabelCollector({ signalsFile: sig, featuresFile: featFile }).getLabels().length === 0);
+  fs.writeFileSync(sig, '{"a":1}');
+  check('non-array signals.json tolerated', new FeatureLabelCollector({ signalsFile: sig, featuresFile: featFile }).getLabels().length === 0);
+  fs.writeFileSync(sig, JSON.stringify([...many.slice(0, 3), null, { label: 'x' }, { asset: 'A' }]));
+  check('malformed records dropped, valid kept', new FeatureLabelCollector({ signalsFile: sig, featuresFile: featFile }).getLabels().length === 3);
+
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+}
+
+// ============================================================
+console.log('\n' + '='.repeat(60));
+if (failures.length === 0) {
+  console.log(`ALL ${passed} CHECKS PASSED`);
+  process.exit(0);
+}
+console.log(`${passed} passed, ${failures.length} FAILED:`);
+for (const f of failures) console.log(`  x ${f}`);
+process.exit(1);

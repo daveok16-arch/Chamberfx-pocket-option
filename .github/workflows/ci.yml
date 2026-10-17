@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  typescript:
+    name: Typecheck + tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: price-bot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: price-bot/package-lock.json
+      # Skip the postinstall Playwright browser download: the suite exercises
+      # the engine's pure logic and never launches a browser.
+      - run: npm ci --ignore-scripts
+      - run: npx tsc --noEmit
+      - run: npm test
+
+  python:
+    name: Inference compile + train smoke
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: inference
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python -m py_compile app.py train.py features.py model_bundle.py
+      # Synthetic dataset: proves the validation paths run end-to-end without
+      # needing a real capture session.
+      - name: Train smoke test
+        run: |
+          python - <<'PY'
+          import json, random
+          random.seed(0)
+          assets = ["EURUSD_otc","GBPUSD_otc","USDJPY_otc","XAUUSD_otc","AUDUSD_otc","USDCAD_otc"]
+          base = {"EURUSD_otc":1.15,"GBPUSD_otc":1.26,"USDJPY_otc":148.2,"XAUUSD_otc":4340.0,"AUDUSD_otc":0.66,"USDCAD_otc":1.36}
+          t0 = 1789863660000
+          rows = []
+          for b in range(60):
+              for a in assets:
+                  px = base[a]
+                  rows.append({
+                      "type":"OBSERVATION","asset":a,"entryAt":t0+b*60000,
+                      "entryPrice":px,"resolvedAt":t0+b*60000+60000,
+                      "expirationPrice":px*(1+random.gauss(0,1e-4)),"delta":px*1e-5,
+                      "label":random.randint(0,1),"outcome":"UP",
+                      "features":{"open":px,"close":px,"high":px*1.0001,"low":px*0.9999,
+                                  "range":px*0.0002,"tickCount":100,"netChangePct":0.0,
+                                  "avgAbsDelta":px*1e-5,"stdDev":px*2e-5,"upRatio":0.5,
+                                  "windowSpanSec":59.0,"momentum60s":0.0},
+                      "source":"feature-label-collector"})
+          json.dump(rows, open("signals.json","w"))
+          PY
+          python train.py --data signals.json --model model.pkl
+          python train.py --data signals.json --walk-forward --folds 3

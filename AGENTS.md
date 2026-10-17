@@ -41,8 +41,9 @@ future execution path must be added deliberately, with its own safety design.
   Confidence is `max(P, 1-P)`.
 - `price-bot/capture.ts` -- entrypoint: capture + collector loop + inference at
   bucket boundaries + Phase 3 filtering + `/health`. Writes `live-prices.json`
-  (features) and `signals.json` (labels) every 15s and flushes on SIGINT.
-  Accepted signals are logged as `[VALID_SIGNAL]` JSON; rejected ones as
+  (features) and `signals.json` (labels) every 15s and flushes on SIGINT or
+  SIGTERM. Writes are atomic (temp file + rename). Accepted signals are logged
+  as `[VALID_SIGNAL]` JSON; rejected ones as
   `[SIGNAL_FILTER] Signal discarded: ...`.
 - `inference/app.py` -- PHASE 2 FastAPI service. `POST /predict` returns
   `{probability (0-1), direction (1|0)}`; `GET /health`; `POST /reload`. Returns
@@ -50,6 +51,21 @@ future execution path must be added deliberately, with its own safety design.
 - `inference/train.py` -- fits a RandomForestClassifier on `signals.json` and
   writes `model.pkl`. Refuses to train below 200 rows (`--min-rows` to override
   for smoke tests) and warns that metrics below 1000 rows are noisy.
+  Validation is TIME-SERIES aware: it sorts by `entryAt`, splits
+  chronologically, PURGES training rows whose 60s label horizon overlaps the
+  test period (plus an `--embargo-ms` gap), optionally runs expanding-window
+  walk-forward (`--walk-forward --folds N`), fits an isotonic CALIBRATION map on
+  a purged slice, and prints an ECONOMIC harness (post-filter win rate + Wilson
+  95% CI vs the `--payout` break-even). Shuffled splits were removed because
+  autocorrelated overlapping windows leak across the boundary.
+- `inference/model_bundle.py` -- `CalibratedModel`, the artifact written to
+  `model.pkl`: the forest plus its optional isotonic calibrator. Lives in its own
+  module (not `train.py`) so `joblib` can unpickle it in the serving process;
+  exposes `n_features_in_`/`predict_proba` so `app.py` needs no special-casing.
+- `price-bot/tests/run.ts` -- `npm test`. Zero-dependency harness covering the
+  filter boundaries, candle/normalize/dedup behavior, and collector invariants
+  (one arm per bucket, 60s horizon, resume-from-disk, monotonic bucket guard,
+  `maxLabels`, malformed-input tolerance).
 - `inference/features.py` -- shared feature contract (14 columns). Magnitudes
   are normalised by the window's `open` price; raw price levels are excluded so
   the model cannot split on asset identity.
@@ -80,6 +96,18 @@ No ML code exists yet. `strategy.ts` collects the supervised-learning dataset:
 - Features slide continuously within the bucket; arming happens once per
   bucket, so `windowSpanSec` is typically ~59s rather than exactly 60s.
 - Dedup of the overlapping `ctx.ticks` snapshots is by `(timestamp, price)`.
+- **Labels persist across restarts.** `FeatureLabelCollector` reads `signals.json`
+  on construction, merges by `(asset, entryAt)`, and seeds the bucket guard, so a
+  redeploy no longer truncates the dataset. In-memory labels are capped by
+  `maxLabels` (default 200k), oldest dropped first. Corrupt/non-array files are
+  logged and ignored rather than crashing capture.
+- **Bucket arming is monotonic.** `evaluate()` only advances to a bucket strictly
+  newer than the last one, so a server-clock reset (or a restart replaying a
+  covered range) cannot re-arm an already-labelled bucket.
+- **Writes are atomic.** `capture.ts` writes to `<file>.tmp` then renames, so a
+  crash mid-write can never leave a truncated `signals.json`.
+- **SIGTERM is handled.** Render/Docker stop containers with SIGTERM; the handler
+  flushes features + labels before exit (SIGINT alone would lose up to 15s).
 
 ## Build / Run
 ```
@@ -87,6 +115,7 @@ cd price-bot
 npm install
 npx playwright install chromium
 npx tsc --noEmit                  # typecheck (must be exit 0)
+npm test                          # 57-check harness (filters, candles, collector)
 npx tsx capture.ts                # live capture, 1m candles + /health
 npx tsx capture.ts --period 180   # (or PERIOD=180)
 npx tsx server.ts                 # engine's own demo main
@@ -94,8 +123,12 @@ npx tsx server.ts                 # engine's own demo main
 cd ../inference
 pip install -r requirements.txt
 uvicorn app:app --port 8000                      # serve /predict
-python train.py --data ../price-bot/signals.json # fit model.pkl
+python train.py --data ../price-bot/signals.json # fit model.pkl (chronological holdout)
+python train.py --data ../price-bot/signals.json --walk-forward --folds 5
 ```
+
+CI (`.github/workflows/ci.yml`) runs typecheck + `npm test` on Node, and a
+Python compile + train smoke test on a synthetic dataset.
 
 Inference env vars: `INFERENCE_URL` (unset = collection-only, no predictions),
 `INFERENCE_TIMEOUT_MS` (5000), `MODEL_FILE` (./model.pkl),
@@ -148,3 +181,25 @@ Inference env vars: `INFERENCE_URL` (unset = collection-only, no predictions),
   normal operation. Verified with a 22-check harness covering the no-trade zone
   boundaries (0.36/0.64 inclusive), the volatility boundary (0.02 inclusive),
   direction mapping and the confidence symmetry `max(P, 1-P)`.
+- **Durability + honest validation implemented 2026-10-17.**
+  * Dataset survives restarts: the collector resumes `signals.json`, merges by
+    `(asset, entryAt)`, caps memory via `maxLabels`, and arms buckets
+    monotonically; `capture.ts` writes atomically and handles SIGTERM. Before
+    this, `autoDeploy: true` silently wiped all collected labels on every push.
+  * `train.py` no longer shuffles. It sorts by `entryAt`, splits
+    chronologically, purges rows whose 60s horizon overlaps the test set (plus
+    an embargo), supports expanding-window walk-forward, fits isotonic
+    calibration on a purged slice, and prints an economic harness (post-filter
+    win rate + Wilson CI vs payout break-even). On random data it now reports
+    "inconclusive" instead of a spuriously confident number.
+  * Added `price-bot/tests/run.ts` (`npm test`, 57 checks) and
+    `.github/workflows/ci.yml`.
+  * Verified: `tsc` exit 0, 57/57 checks pass, chronological + walk-forward
+    training runs end-to-end, calibrated `model.pkl` serves through `app.py`
+    (`/health`, `/predict`, `/reload`).
+- **Still missing (deliberately out of scope for this pass):** `INFERENCE_URL`
+  is not wired into any deploy config, so the deployed collector runs
+  collection-only; `inference/` has no Dockerfile/service; no LICENSE file; the
+  `momentum60s` feature duplicates `netChangePct`; no retrain scheduling.
+  Validation results are still only as good as the data — the pipeline has no
+  evidence of a real edge yet.
