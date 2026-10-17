@@ -33,6 +33,8 @@ import {
   type StrategyContext,
 } from './strategy.js';
 import { evaluateSignal, type ValidSignal } from './signalFilter.js';
+import { LocalPredictor, PredictionRouter } from './predictor.js';
+import { TelegramDeliverer } from './deliverer.js';
 import * as fs from 'fs';
 import * as http from 'http';
 
@@ -97,38 +99,57 @@ async function main() {
     signalsFile: './signals.json',
   });
 
-  // --- Inference: score each window at the 60s bucket boundary ---------
-  // Enabled only when INFERENCE_URL is set, so collection still runs
-  // standalone with no Python service present.
+  // --- Prediction: score EVERY window at the 60s bucket boundary -------
+  // A prediction bot must always predict. The ML service is preferred when
+  // INFERENCE_URL is set and a model is trained; otherwise the local baseline
+  // answers, so the bot never goes silent. Every prediction is emitted (logged
+  // and delivered); the Phase 3 filters additionally mark which ones cleared
+  // the confidence/volatility bar.
   const inference = new InferenceClient();
+  const predictor = new PredictionRouter(
+    inference.isEnabled() ? inference : null,
+    new LocalPredictor()
+  );
+  console.log(`[PREDICT] active predictor: ${predictor.name}`);
+
   const predictions: Record<string, PredictionResult> = {};
   /** Most recent signal that cleared every filter, per asset. */
   const validSignals: Record<string, ValidSignal> = {};
-  let rejectedSignals = 0;
+  /** Rolling counts for observability. */
+  const predictionStats = { total: 0, ml: 0, local: 0, accepted: 0, rejected: 0 };
+
+  const deliverer = new TelegramDeliverer();
 
   collector.onBucketBoundary((asset: string, features: FeatureWindow) => {
-    // Fire-and-forget: the async request must not block the evaluate loop.
-    void inference
+    // Fire-and-forget: scoring must not block the evaluate loop.
+    void predictor
       .predict(asset, features)
       .then((result) => {
         if (!result) return;
         predictions[asset] = result;
+        predictionStats.total++;
+        if (result.source === 'ml') predictionStats.ml++;
+        else predictionStats.local++;
+
+        const tag = result.source === 'ml' ? 'ML' : 'BASE';
         console.log(
-          `[INFER] ${asset} P(UP)=${result.probability.toFixed(4)} ` +
-            `-> ${result.direction === 1 ? 'UP(1)' : 'DOWN(0)'}`
+          `[PREDICT] ${asset} P(UP)=${result.probability.toFixed(4)} ` +
+            `-> ${result.direction === 1 ? 'UP(1)' : 'DOWN(0)'} [${tag}]`
         );
 
-        // Phase 3: gate the raw prediction before it reaches any consumer.
-        // A rejection is normal operation, not an error.
+        // Phase 3: gate the raw prediction. A rejection is normal operation,
+        // not an error — it only means the window was not tradeable.
         const outcome = evaluateSignal(result, features);
         if (!outcome.accepted) {
-          rejectedSignals++;
+          predictionStats.rejected++;
           console.log(`[SIGNAL_FILTER] Signal discarded: ${outcome.detail}`);
           return;
         }
 
+        predictionStats.accepted++;
         validSignals[asset] = outcome.signal;
         console.log(`[VALID_SIGNAL] ${JSON.stringify(outcome.signal)}`);
+        void deliverer.send(outcome.signal, features, result.source ?? 'unknown');
       });
   });
 
@@ -176,13 +197,13 @@ async function main() {
     collectAll();     // ensure features are current before snapshotting
     writeOutputs();
     const s = collector.getStats();
-    const inf = inference.getStats();
+    const d = deliverer.getStats();
     console.log(
       `[COLLECT] labels=${s.labels} pending=${s.pending} assets=${s.assets} skipped=${s.skipped}` +
-        (inf.enabled
-          ? ` | predictions ok=${inf.successes} failed=${inf.failures}` +
-            ` | signals accepted=${Object.keys(validSignals).length} rejected=${rejectedSignals}`
-          : '')
+        ` | predictions total=${predictionStats.total}` +
+        ` ml=${predictionStats.ml} base=${predictionStats.local}` +
+        ` | signals accepted=${predictionStats.accepted} rejected=${predictionStats.rejected}` +
+        (d.enabled ? ` | telegram sent=${d.sent} failed=${d.failed} throttled=${d.throttled}` : '')
     );
   }, 15000);
 
@@ -203,10 +224,12 @@ async function main() {
         assets: prices.size,
         prices: Object.fromEntries(prices),
         candlePeriod: `${candlePeriod}s`,
+        predictor: predictor.name,
         inference: inference.getStats(),
+        predictionStats,
         predictions,
         validSignals,
-        rejectedSignals,
+        telegram: deliverer.getStats(),
         timestamp: Date.now(),
       }));
     } else {
@@ -242,6 +265,11 @@ async function main() {
       writeOutputs(); // flush current features + labels before exit
       const s = collector.getStats();
       console.log(`[COLLECT] final: labels=${s.labels} pending=${s.pending} assets=${s.assets}`);
+      console.log(
+        `[PREDICT] final: total=${predictionStats.total} ml=${predictionStats.ml} ` +
+          `base=${predictionStats.local} accepted=${predictionStats.accepted} ` +
+          `rejected=${predictionStats.rejected}`
+      );
     } catch (e) {
       console.error(`[COLLECT] shutdown flush failed: ${(e as Error).message}`);
     }

@@ -1,22 +1,23 @@
-# Pocket Option OTC — Live Price Capture
+# Pocket Option OTC — Live Price Capture & Direction Prediction
 
 ## Purpose
-Foundational live-price capture engine for Pocket Option OTC pairs. Streams
-real-time ticks and builds candles from the broker's Socket.IO WebSocket. This
-repo is intentionally market-data ONLY: the strategy, risk, execution, signal,
-and paper-trading layers were all removed (2026-09-19) so an AI/ML prediction
-pipeline can be built on a clean slate.
+Live-price capture engine and direction predictor for Pocket Option OTC pairs.
+Streams real-time ticks from the broker's Socket.IO WebSocket, builds candles,
+collects a supervised-learning dataset, predicts a direction for every closed
+60s window, and delivers the signals that clear the quality filters.
 
-## No trading logic (critical)
-There is NO decision or order code in this repo:
-- no strategy / direction selection
-- no risk gates
+## No execution (critical)
+This repo predicts and delivers; it does NOT trade:
+- no risk gates, no staking, no position sizing
 - no execution / order sending (the `openOrder` path was removed)
-- no paper-trading mode, no `signals.jsonl`, no webhook/Telegram delivery
+- no paper-trading mode
+
+Delivery is a notification path only (Telegram, see `deliverer.ts`). Nothing
+here can place an order. Any future execution path must be added deliberately,
+with its own safety design.
 
 `server.ts` no longer exposes `send()`, `isDemoMode()`, or
-`setAuthPacketForTest()` — those existed only for the execution layer. Any
-future execution path must be added deliberately, with its own safety design.
+`setAuthPacketForTest()` — those existed only for the execution layer.
 
 ## Architecture
 - `price-bot/server.ts` -- verified live price-capture engine.
@@ -39,12 +40,25 @@ future execution path must be added deliberately, with its own safety design.
   `evaluateSignal(prediction, features)` returns an accepted `ValidSignal`
   (`{timestamp, asset, direction:'CALL'|'PUT', confidence}`) or a discard reason.
   Confidence is `max(P, 1-P)`.
-- `price-bot/capture.ts` -- entrypoint: capture + collector loop + inference at
-  bucket boundaries + Phase 3 filtering + `/health`. Writes `live-prices.json`
-  (features) and `signals.json` (labels) every 15s and flushes on SIGINT or
-  SIGTERM. Writes are atomic (temp file + rename). Accepted signals are logged
-  as `[VALID_SIGNAL]` JSON; rejected ones as
-  `[SIGNAL_FILTER] Signal discarded: ...`.
+- `price-bot/predictor.ts` -- the prediction layer. `Predictor` interface with
+  two implementations: `LocalPredictor` (deterministic baseline — trend +
+  momentum + tick-imbalance, scaled by the window's own volatility; always
+  answers, output clamped to [0.02, 0.98]) and `PredictionRouter` (prefers the
+  ML service, falls back to the baseline when `INFERENCE_URL` is unset, the
+  service is down, or no model is trained). Every prediction carries
+  `source: 'ml' | 'local-baseline'`, so an ML answer is never confused with a
+  baseline one. The baseline is a placeholder, NOT a claimed edge.
+- `price-bot/deliverer.ts` -- `TelegramDeliverer`. Ships accepted signals to a
+  Telegram chat when `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` are set; inert
+  otherwise. Per-asset cooldown (`SIGNAL_COOLDOWN_MS`, default 5 min) prevents
+  the ~360 msg/hour a 6-asset every-minute cadence would otherwise produce.
+  Sends are serialised; failures are counted, never fatal.
+- `price-bot/capture.ts` -- entrypoint: capture + collector loop + prediction at
+  bucket boundaries + Phase 3 filtering + delivery + `/health`. Writes
+  `live-prices.json` (features) and `signals.json` (labels) every 15s and
+  flushes on SIGINT or SIGTERM. Writes are atomic (temp file + rename).
+  Every prediction is logged as `[PREDICT]`; accepted signals as
+  `[VALID_SIGNAL]`; rejected ones as `[SIGNAL_FILTER] Signal discarded: ...`.
 - `inference/app.py` -- PHASE 2 FastAPI service. `POST /predict` returns
   `{probability (0-1), direction (1|0)}`; `GET /health`; `POST /reload`. Returns
   HTTP 503 (never a fabricated probability) when no model is loaded.
@@ -130,9 +144,11 @@ python train.py --data ../price-bot/signals.json --walk-forward --folds 5
 CI (`.github/workflows/ci.yml`) runs typecheck + `npm test` on Node, and a
 Python compile + train smoke test on a synthetic dataset.
 
-Inference env vars: `INFERENCE_URL` (unset = collection-only, no predictions),
+Inference env vars: `INFERENCE_URL` (unset = baseline predictor only),
 `INFERENCE_TIMEOUT_MS` (5000), `MODEL_FILE` (./model.pkl),
 `MODEL_AUTO_RELOAD` (1), `PREDICTION_THRESHOLD` (0.5).
+Delivery env vars: `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (both required to
+enable delivery), `SIGNAL_COOLDOWN_MS` (300000).
 
 ## Data interfaces (from server.ts)
 - `Tick {assetId,price,timestamp,direction}`
@@ -192,14 +208,29 @@ Inference env vars: `INFERENCE_URL` (unset = collection-only, no predictions),
     calibration on a purged slice, and prints an economic harness (post-filter
     win rate + Wilson CI vs payout break-even). On random data it now reports
     "inconclusive" instead of a spuriously confident number.
-  * Added `price-bot/tests/run.ts` (`npm test`, 57 checks) and
+  * Added `price-bot/tests/run.ts` (`npm test`, now 81 checks) and
     `.github/workflows/ci.yml`.
-  * Verified: `tsc` exit 0, 57/57 checks pass, chronological + walk-forward
+  * Verified: `tsc` exit 0, 81/81 checks pass, chronological + walk-forward
     training runs end-to-end, calibrated `model.pkl` serves through `app.py`
     (`/health`, `/predict`, `/reload`).
-- **Still missing (deliberately out of scope for this pass):** `INFERENCE_URL`
-  is not wired into any deploy config, so the deployed collector runs
-  collection-only; `inference/` has no Dockerfile/service; no LICENSE file; the
-  `momentum60s` feature duplicates `netChangePct`; no retrain scheduling.
-  Validation results are still only as good as the data — the pipeline has no
-  evidence of a real edge yet.
+- **Always-on prediction + delivery implemented 2026-10-16** (`predictor.ts`,
+  `deliverer.ts`). This is the change that makes it a *prediction* bot rather
+  than a data collector:
+  * Every closed 60s window is now scored, even with no trained model and no
+    inference service. `LocalPredictor` (deterministic baseline) answers when
+    the ML path is unavailable; `PredictionRouter` prefers the ML service and
+    falls back automatically. Every prediction carries its `source`.
+  * Every prediction is logged (`[PREDICT] ... [ML]|[BASE]`) and surfaced on
+    `/health` (`predictionStats`, `predictor`). Accepted signals are delivered
+    to Telegram when credentials are present.
+  * Per-asset delivery cooldown (default 5 min) because a 6-asset
+    every-minute cadence would otherwise send ~360 messages/hour.
+  * Verified live: 18 windows scored, ML and fallback both exercised (6 `[ML]`
+    then 12 `[BASE]` after the service was killed), Telegram 12 sent / 0 failed
+    / 4 throttled. The bot never stopped predicting through an ML outage.
+- **Still missing:** `INFERENCE_URL` is not wired into any deploy config, so the
+  deployed collector runs on the baseline predictor; `inference/` has no
+  Dockerfile/service; no LICENSE file; the `momentum60s` feature duplicates
+  `netChangePct`; no retrain scheduling. **The baseline is a placeholder with no
+  claimed edge — validation is still only as good as the data, and the pipeline
+  has no evidence of a real edge yet.**

@@ -20,6 +20,7 @@
  */
 
 import type { Candle, Tick } from './server.js';
+import type { Predictor } from './predictor.js';
 import * as fs from 'fs';
 
 export type StrategyDirection = 'call' | 'put';
@@ -148,6 +149,11 @@ export interface PredictionResult {
   direction: 0 | 1;
   /** Decision threshold the service applied. */
   threshold: number;
+  /**
+   * Which predictor produced this: the ML service or the local baseline
+   * fallback. Absent on raw `/predict` responses; set by the prediction layer.
+   */
+  source?: 'ml' | 'local-baseline';
 }
 
 /**
@@ -156,7 +162,8 @@ export interface PredictionResult {
  * Fire-and-forget by design: /predict is a best-effort side channel, and a
  * slow or down service must never stall the capture/collection loop.
  */
-export class InferenceClient {
+export class InferenceClient implements Predictor {
+  readonly name = 'ml-service';
   private readonly url: string;
   private readonly timeoutMs: number;
   private readonly enabled: boolean;
@@ -220,6 +227,7 @@ export class InferenceClient {
         probability: body.probability,
         direction: body.direction === 1 ? 1 : 0,
         threshold: body.threshold,
+        source: 'ml',
       };
       this.latest.set(asset, result);
       return result;

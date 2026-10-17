@@ -28,9 +28,12 @@ be built on a clean slate. What remains is a verified live feed plus a small
 ```
 price-bot/
   server.ts            Live price-capture engine (Playwright + WebSocket)
-  strategy.ts          Feature/label collector + inference client
+  strategy.ts          Feature/label collector + ML inference client
+  predictor.ts         Prediction layer: baseline predictor + ML/fallback router
   signalFilter.ts      Signal quality filters + confidence guardrails
-  capture.ts           Entrypoint: capture + collector + inference + filtering
+  deliverer.ts         Telegram signal delivery (throttled, best-effort)
+  capture.ts           Entrypoint: capture + collector + prediction + delivery
+  tests/run.ts         Unit/integration test suite (npm test)
   tsconfig.json        TypeScript config
 inference/
   app.py               FastAPI service: /predict /health /reload
@@ -78,8 +81,14 @@ a supervised-learning dataset. Proposes no trades.
 RandomForestClassifier on the collected dataset and serves live probabilities.
 
 **Phase 3 — signal quality filters** (`price-bot/signalFilter.ts`): gates each
-raw prediction so only premium, high-confidence signals are surfaced. This is
-strictly a signal generator — nothing executes trades.
+raw prediction so only premium, high-confidence signals are surfaced.
+
+**Prediction + delivery** (`price-bot/predictor.ts`, `price-bot/deliverer.ts`):
+every closed window is scored, always. The ML service is preferred; a
+deterministic local baseline answers when it is unavailable, so the bot predicts
+continuously rather than only after a model exists. Signals that clear the
+filters are delivered to Telegram (if configured). This is strictly a signal
+generator — nothing executes trades.
 
 ```
 price-bot/capture.ts                     inference/
@@ -87,10 +96,16 @@ price-bot/capture.ts                     inference/
    └───────────────────────────────────────►├── app.py       FastAPI /predict
         │                                   ├── train.py     fits model.pkl
         ▼                                   ├── features.py  shared contract
-   signalFilter.ts  (confidence + volatility)└── model.pkl    weights (gitignored)
+   predictor.ts  (ML ──fallback──► baseline) └── model.pkl    weights (gitignored)
+        │  [PREDICT] ... [ML]|[BASE]
+        ▼
+   signalFilter.ts  (confidence + volatility)
         │
         ├─ reject -> [SIGNAL_FILTER] Signal discarded: ...
         └─ accept -> [VALID_SIGNAL] {timestamp, asset, direction, confidence}
+                        │
+                        ▼
+                 deliverer.ts -> Telegram (per-asset cooldown)
 ```
 
 ### Filter rules
@@ -133,8 +148,26 @@ cd inference && python train.py --data ../price-bot/signals.json
 ```
 
 `/predict` returns HTTP **503** until a model is trained — it never fabricates a
-probability, and there is no 0.50 fallback. With `INFERENCE_URL` unset, the
-collector runs standalone.
+probability, and there is no 0.50 fallback. With `INFERENCE_URL` unset (or the
+service down / model missing), the local baseline predictor answers instead, so
+the bot keeps predicting — every prediction is tagged `[ML]` or `[BASE]` in the
+log and on `/health`.
+
+### Signal delivery (Telegram)
+
+Delivery is off unless both credentials are set:
+
+```bash
+cd price-bot
+TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... npx tsx capture.ts
+```
+
+- Only signals that pass the Phase 3 filters are delivered.
+- Per-asset cooldown (`SIGNAL_COOLDOWN_MS`, default 300000 = 5 min) keeps a
+  6-asset, every-minute cadence from flooding the chat with the same state.
+- Delivery is best-effort: failures are counted (`telegram.failed` on
+  `/health`), never fatal to capture.
+- Nothing here can place a trade — it is a notification path only.
 
 ### What the collector emits
 
