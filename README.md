@@ -42,8 +42,12 @@ inference/
   model_bundle.py      CalibratedModel artifact (forest + isotonic calibrator)
   requirements.txt     Python dependencies
   README.md            Inference service docs
-Dockerfile             (repo root) Render.com deployment image
-render.yaml            (repo root) Render blueprint
+Dockerfile             (repo root) Render.com deployment image (both services)
+render.yaml            (repo root) Render blueprint (disk + env)
+deploy/
+  supervisord.conf     Runs capture + inference + retrain in one container
+  entrypoint.sh        Prepares the data dir, then execs supervisord
+  retrain-loop.sh      Periodic train.py (no-op until the row floor is met)
 .github/workflows/     CI: typecheck + tests + train smoke test
 ```
 
@@ -235,17 +239,32 @@ collector.evaluate(ctx, assetId);
 ## Deploy on Render.com
 
 This repo is configured for Render via the `render.yaml` blueprint and a Dockerfile.
+One service runs the whole pipeline: the TypeScript capture/prediction engine, the
+Python inference service, and a periodic retrain loop, all under supervisord.
 
 ### Option A — Blueprint (recommended)
 1. Push this repo to GitHub.
 2. In Render: **New → Blueprint** → select the repo. Render reads `render.yaml` and creates the web service.
-3. Deploy. Render builds the Docker image (root `./Dockerfile`, app in `price-bot/`), installs Playwright/chromium, and starts the capture engine. Health checks hit `/health` on port `10000`.
+3. Deploy. Render builds the Docker image (root `./Dockerfile`), installs Playwright/chromium and the Python inference deps, and starts all processes. Health checks hit `/health` on port `10000`.
+4. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in the dashboard to enable signal delivery (optional).
 
 ### Option B — Manual web service
 1. **New → Web Service** → connect the repo.
 2. **Runtime:** Docker. (Leave **Root Directory** empty — the Dockerfile is at the repo root.) **Dockerfile path:** `./Dockerfile`.
-3. **Instance plan:** `starter` or higher (Playwright/chromium needs ~1GB RAM — bump to `standard` if you see OOM).
-4. Deploy.
+3. **Instance plan:** `standard` or higher (Playwright/chromium + scikit-learn need headroom; `starter` OOMs).
+4. Add a **persistent disk** mounted at `/app/data` (1 GB is plenty). Without it, `autoDeploy` wipes the dataset on every push.
+5. Deploy.
+
+### What runs in the container
+
+| Process | Purpose |
+|---------|---------|
+| `capture` | the TypeScript engine — ticks, features, labels, predictions, `/health` |
+| `inference` | FastAPI model server (`/predict`, `/health`, `/reload`) on `127.0.0.1:8000` |
+| `retrain` | re-runs `train.py` every `RETRAIN_INTERVAL_SEC`; a no-op until enough rows exist |
+
+The engine talks to the model service over `INFERENCE_URL=http://127.0.0.1:8000`,
+so predictions are `[ML]` once a model is trained and `[BASE]` (baseline) until then.
 
 ### Environment variables
 
@@ -253,6 +272,13 @@ This repo is configured for Render via the `render.yaml` blueprint and a Dockerf
 |----------|----------|-------------|
 | `PORT`   | no (default 10000) | HTTP health server port (Render sets this) |
 | `PERIOD` | no (default 60)   | Candle period in seconds: `60` \| `180` \| `300` |
+| `SIGNALS_FILE` | no (default `/app/data/signals.json`) | labelled dataset — put it on the disk |
+| `FEATURES_FILE` | no (default `/app/data/live-prices.json`) | live feature snapshot |
+| `MODEL_FILE` | no (default `/app/data/model.pkl`) | trained model served by the inference service |
+| `RETRAIN_INTERVAL_SEC` | no (default 1800) | retrain cadence |
+| `TELEGRAM_BOT_TOKEN` | no | enables delivery when set with `TELEGRAM_CHAT_ID` |
+| `TELEGRAM_CHAT_ID` | no | delivery target |
+| `SIGNAL_COOLDOWN_MS` | no (default 300000) | per-asset delivery cooldown |
 
 ---
 

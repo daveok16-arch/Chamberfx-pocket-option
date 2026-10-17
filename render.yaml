@@ -1,16 +1,24 @@
-# Render.com Blueprint — Chamberfx Pocket Option OTC Live Price Capture
-# =====================================================================
-# Deploys the TypeScript capture engine as a Docker web service.
-# It streams live Pocket Option OTC ticks + candles over the authenticated
-# Socket.IO WebSocket and exposes a /health endpoint. This is the market-data
-# foundation for the AI/ML prediction pipeline (no strategy/risk/execution).
+# Render.com Blueprint — Chamberfx Pocket Option OTC capture + prediction
+# =======================================================================
+# Deploys ONE Docker web service that runs both halves of the pipeline:
+#   - the TypeScript capture/prediction engine (ticks, features, labels)
+#   - the FastAPI inference service (the trained model)
+# plus a periodic retrain loop. supervisord runs all three; the engine serves
+# /health on PORT.
 #
 # The Dockerfile lives at the REPO ROOT (not price-bot/) so Render — which
-# clones the repo root — finds it directly. The app source is price-bot/.
+# clones the repo root — finds it directly.
 #
 # Apply: render blueprint deploy (Render dashboard) or `render blueprint apply`.
-# Optional:
-#   PERIOD  — candle period in seconds: 60 | 180 | 300 (default 60)
+#
+# Environment:
+#   PERIOD                — candle period in seconds: 60 | 180 | 300 (default 60)
+#   RETRAIN_INTERVAL_SEC  — how often the retrain loop runs (default 1800)
+#   TELEGRAM_BOT_TOKEN    — set in the dashboard (sync: false) to enable delivery
+#   TELEGRAM_CHAT_ID      — set in the dashboard (sync: false) to enable delivery
+#
+# The persistent disk is what makes the dataset survive `autoDeploy` rebuilds:
+# signals.json / live-prices.json / model.pkl all live under /app/data.
 
 services:
   - type: web
@@ -20,6 +28,10 @@ services:
     plan: standard           # Playwright+Chromium OOMs the 512MB starter (SIGTERM kills mid-session);standard gives headroom
     healthCheckPath: /health
     autoDeploy: true
+    disk:
+      name: chamberfx-data
+      mountPath: /app/data
+      sizeGB: 1
     envVars:
       - key: NODE_ENV
         value: production
@@ -27,3 +39,21 @@ services:
         value: 10000
       - key: PERIOD
         value: "60"
+      # The dataset and the trained model live on the mounted disk, so a
+      # redeploy does not wipe the observations collected since the last push.
+      - key: DATA_DIR
+        value: /app/data
+      - key: SIGNALS_FILE
+        value: /app/data/signals.json
+      - key: FEATURES_FILE
+        value: /app/data/live-prices.json
+      - key: MODEL_FILE
+        value: /app/data/model.pkl
+      - key: RETRAIN_INTERVAL_SEC
+        value: "1800"
+      # Secrets: `sync: false` means Render prompts for these in the dashboard
+      # rather than storing them in source. Delivery stays off until both are set.
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false

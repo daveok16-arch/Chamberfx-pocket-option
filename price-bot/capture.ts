@@ -94,10 +94,12 @@ async function main() {
   await bot.connect();
 
   // --- Phase 1: feature/label collector -------------------------------
-  const collector = new FeatureLabelCollector({
-    featuresFile: './live-prices.json',
-    signalsFile: './signals.json',
-  });
+  // Paths are env-overridable so the deployed container can point them at a
+  // mounted persistent disk (see render.yaml). Without that, `autoDeploy`
+  // rebuilds wipe the dataset on every push.
+  const featuresFile = process.env.FEATURES_FILE ?? './live-prices.json';
+  const signalsFile = process.env.SIGNALS_FILE ?? './signals.json';
+  const collector = new FeatureLabelCollector({ featuresFile, signalsFile });
 
   // --- Prediction: score EVERY window at the 60s bucket boundary -------
   // A prediction bot must always predict. The ML service is preferred when
@@ -189,8 +191,8 @@ async function main() {
 
   const writeOutputs = () => {
     const now = bot.getServerTime();
-    writeAtomic('./live-prices.json', JSON.stringify(collector.getFeatureSnapshot(now), null, 2));
-    writeAtomic('./signals.json', JSON.stringify(collector.getLabels(), null, 2));
+    writeAtomic(featuresFile, JSON.stringify(collector.getFeatureSnapshot(now), null, 2));
+    writeAtomic(signalsFile, JSON.stringify(collector.getLabels(), null, 2));
   };
 
   const writeTimer = setInterval(() => {

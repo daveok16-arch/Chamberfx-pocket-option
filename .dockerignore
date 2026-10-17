@@ -1,8 +1,6 @@
 **/node_modules
 **/dist
 **/*.log
-**/live-prices.json
-**/prices.json
 .git
 **/.gitignore
 **/README.md
@@ -10,3 +8,14 @@
 **/.env.example
 price-bot/Dockerfile
 price-bot/.dockerignore
+
+# Local capture artifacts and trained weights must never be baked into the
+# image: the container collects its own data onto the mounted disk, and a
+# committed model.pkl would ship a model trained on someone else's machine.
+**/live-prices.json
+**/prices.json
+**/signals.json
+**/model.pkl
+**/__pycache__
+**/.venv
+**/.pytest_cache

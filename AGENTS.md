@@ -228,9 +228,26 @@ enable delivery), `SIGNAL_COOLDOWN_MS` (300000).
   * Verified live: 18 windows scored, ML and fallback both exercised (6 `[ML]`
     then 12 `[BASE]` after the service was killed), Telegram 12 sent / 0 failed
     / 4 throttled. The bot never stopped predicting through an ML outage.
-- **Still missing:** `INFERENCE_URL` is not wired into any deploy config, so the
-  deployed collector runs on the baseline predictor; `inference/` has no
-  Dockerfile/service; no LICENSE file; the `momentum60s` feature duplicates
-  `netChangePct`; no retrain scheduling. **The baseline is a placeholder with no
-  claimed edge — validation is still only as good as the data, and the pipeline
-  has no evidence of a real edge yet.**
+- **Inference wired into the deploy (one container) — 2026-10-16.** The Python
+  model service is no longer a local-only extra. The root `Dockerfile` now
+  installs Python + a venv with the inference deps, and `deploy/supervisord.conf`
+  runs three programs in one Render service:
+  * `capture`   — the TypeScript engine (`tsx capture.ts`)
+  * `inference` — `uvicorn app:app` on `127.0.0.1:8000`
+  * `retrain`   — `deploy/retrain-loop.sh`, re-running `train.py` on a schedule
+  `INFERENCE_URL` is set to `http://127.0.0.1:8000` for the engine, so the
+  deployed bot scores `[ML]` as soon as a model exists — no manual step.
+  Verified by building the image and running it: supervisord brought all three
+  programs up, the engine connected live, `/health` reported
+  `ml+local-baseline-fallback`, the retrain loop trained a model from a seeded
+  dataset, the service auto-reloaded it, and predictions flipped from `[BASE]`
+  to `[ML]` with no restart.
+- **Dataset + model now persist across deploys.** `render.yaml` attaches a 1 GB
+  disk at `/app/data`, and `SIGNALS_FILE` / `FEATURES_FILE` / `MODEL_FILE` point
+  there. Without this, `autoDeploy: true` wiped every collected label on each
+  push. Verified: `docker stop` flushed 18 labels (exit 0), the files survived on
+  the volume, and a restart resumed them ("resumed 18 label(s)").
+- **Still missing:** no LICENSE file; the `momentum60s` feature duplicates
+  `netChangePct`; retraining is time-based, not triggered by data growth.
+  **The baseline remains a placeholder with no claimed edge, and the pipeline
+  still has no evidence of a real edge — validation is only as good as the data.**
