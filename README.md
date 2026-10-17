@@ -201,7 +201,7 @@ outcome over the next 60 seconds:
 
 Feature window fields: `tickCount`, `open`, `close`, `high`, `low`,
 `netChange`, `netChangePct`, `range`, `avgAbsDelta`, `stdDev`, `upRatio`,
-`windowSpanSec`, `momentum60s`.
+`windowSpanSec`, `recentMomentumPct`.
 
 ### How it is wired
 

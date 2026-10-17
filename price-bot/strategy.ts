@@ -82,12 +82,23 @@ export interface FeatureWindow {
   avgAbsDelta: number;
   /** Sample stddev of tick prices. */
   stdDev: number;
-  /** Share of ticks classified UP (0..1). */
+  /**
+   * Share of *directional* ticks that were UP: `up / (up + down)`, in 0..1.
+   * FLAT ticks (price unchanged) are excluded from both terms, and a window
+   * with no directional ticks reports the neutral 0.5. Dividing by the total
+   * tick count instead would bias this toward 0, because ~30% of ticks repeat
+   * the previous price.
+   */
   upRatio: number;
   /** Seconds spanned by the ticks actually present (may be < WINDOW_MS). */
   windowSpanSec: number;
-  /** 60s momentum: close vs close 60s earlier (0 if insufficient history). */
-  momentum60s: number;
+  /**
+   * Momentum over the *recent* half of the window: `(last - mid) / mid`, where
+   * `mid` is the price at the window's midpoint. This is deliberately not the
+   * full-window return — that is already `netChangePct`, and a duplicate column
+   * only splits importance between two copies of one signal.
+   */
+  recentMomentumPct: number;
 }
 
 export interface LabelRecord {
@@ -504,6 +515,7 @@ export class FeatureLabelCollector implements Strategy {
     let low = Infinity;
     let absDeltaSum = 0;
     let upCount = 0;
+    let downCount = 0;
     let sum = 0;
 
     for (let i = 0; i < buf.length; i++) {
@@ -513,6 +525,7 @@ export class FeatureLabelCollector implements Strategy {
       sum += p;
       if (i > 0) absDeltaSum += Math.abs(p - buf[i - 1].price);
       if (buf[i].direction === 'UP') upCount++;
+      else if (buf[i].direction === 'DOWN') downCount++;
     }
 
     const open = buf[0].price;
@@ -522,8 +535,13 @@ export class FeatureLabelCollector implements Strategy {
     for (const t of buf) varianceSum += (t.price - mean) ** 2;
     const stdDev = buf.length > 1 ? Math.sqrt(varianceSum / (buf.length - 1)) : 0;
 
-    // 60s momentum: compare against the oldest tick in the window.
-    const momentum60s = open > 0 ? (close - open) / open : 0;
+    // Momentum over the recent half of the window, anchored at the midpoint
+    // tick. Distinct from netChangePct (the full-window return), so the two
+    // columns carry different information instead of duplicating one signal.
+    const mid = buf[Math.floor((buf.length - 1) / 2)].price;
+    const recentMomentumPct = mid > 0 ? (close - mid) / mid : 0;
+
+    const directional = upCount + downCount;
 
     return {
       lastTickAt: buf[buf.length - 1].timestamp,
@@ -537,9 +555,10 @@ export class FeatureLabelCollector implements Strategy {
       range: high - low,
       avgAbsDelta: buf.length > 1 ? absDeltaSum / (buf.length - 1) : 0,
       stdDev,
-      upRatio: buf.length > 0 ? upCount / buf.length : 0,
+      // FLAT ticks are excluded; an all-flat window is neutral, not "all down".
+      upRatio: directional > 0 ? upCount / directional : 0.5,
       windowSpanSec: (buf[buf.length - 1].timestamp - buf[0].timestamp) / 1000,
-      momentum60s,
+      recentMomentumPct,
     };
   }
 

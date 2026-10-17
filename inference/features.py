@@ -8,7 +8,7 @@ Input is the `FeatureWindow` object the TypeScript collector writes into
 `signals.json` / `live-prices.json`:
 
     {tickCount, open, close, high, low, netChange, netChangePct, range,
-     avgAbsDelta, stdDev, upRatio, windowSpanSec, momentum60s}
+     avgAbsDelta, stdDev, upRatio, windowSpanSec, recentMomentumPct}
 
 Raw price levels (open/close/high/low/netChange/range/stdDev/avgAbsDelta) are
 deliberately NOT fed to the model. The six OTC pairs trade at wildly different
@@ -17,6 +17,11 @@ recover asset identity from price level alone — it would split on "which pair
 is this" instead of on market structure, and would not generalise. Every
 magnitude feature is therefore divided by the window's open price to become
 scale-free.
+
+`upRatio` counts only directional ticks (FLAT ticks are excluded), and
+`recentMomentumPct` is the return over the recent half of the window rather
+than the full window — a second copy of `netChangePct` would only split
+importance between two views of one signal.
 """
 
 from __future__ import annotations
@@ -42,7 +47,7 @@ NUMERIC_FEATURES: list[str] = [
     "stdDevPct",
     "upRatio",
     "windowSpanSec",
-    "momentum60s",
+    "recentMomentumPct",
 ]
 
 # One-hot asset columns, appended after the numeric block.
@@ -88,7 +93,7 @@ def build_vector(features: dict[str, Any], asset: str) -> list[float]:
         _f(features, "stdDev") / denom,
         _f(features, "upRatio"),
         _f(features, "windowSpanSec"),
-        _f(features, "momentum60s"),
+        _f(features, "recentMomentumPct"),
     ]
 
     onehot = [1.0 if asset == a else 0.0 for a in ASSETS]

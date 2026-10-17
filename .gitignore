@@ -9,6 +9,10 @@ live-prices.json
 signals.json
 prices.json
 
+# Archived datasets (pre-schema-fix). Kept locally for reference only; never
+# committed, and must never be mixed with current-schema data.
+price-bot/archive/
+
 # Python / ML
 __pycache__/
 *.pyc

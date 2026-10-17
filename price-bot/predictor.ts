@@ -44,8 +44,8 @@ const MIN_VOL_SCALE = 1e-6;
  * very different price scales (EURUSD ~1.13 vs XAUUSD ~4173):
  *
  *   - trend      : `netChangePct / volScale`  — direction over the window
- *   - momentum   : `momentum60s / open / volScale` — direction over the prior minute
- *   - imbalance  : `(upRatio - 0.5) * 2` — share of ticks that ticked up
+ *   - momentum   : `recentMomentumPct / volScale` — direction over the recent half
+ *   - imbalance  : `(upRatio - 0.5) * 2` — share of directional ticks that ticked up
  *
  * The blended score is squashed through a logistic. The output is clamped away
  * from 0 and 1 because a placeholder has no business claiming certainty — that
@@ -70,9 +70,12 @@ export class LocalPredictor implements Predictor {
 
     const trend =
       Number.isFinite(features.netChangePct) ? features.netChangePct / volScale : 0;
+    // Already a scale-free percentage (like netChangePct), so it is divided by
+    // volScale only. Dividing by `open` as well would re-inject the raw price
+    // level and undo the scale-free property the features are built around.
     const momentum =
-      Number.isFinite(features.momentum60s) && open > 0
-        ? features.momentum60s / open / volScale
+      Number.isFinite(features.recentMomentumPct)
+        ? features.recentMomentumPct / volScale
         : 0;
     const imbalance =
       (Number.isFinite(features.upRatio) ? features.upRatio : 0.5) - 0.5;

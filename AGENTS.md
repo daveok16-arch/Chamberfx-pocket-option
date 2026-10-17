@@ -96,7 +96,7 @@ No ML code exists yet. `strategy.ts` collects the supervised-learning dataset:
 
 - **Feature window:** trailing 60s per asset. Fields: `tickCount, open, close,
   high, low, netChange, netChangePct, range, avgAbsDelta, stdDev, upRatio,
-  windowSpanSec, momentum60s`. Written live to `live-prices.json`.
+  windowSpanSec, recentMomentumPct`. Written live to `live-prices.json`.
 - **Label:** the price 60s later vs the entry price. `label` is binary
   (1 = UP, 0 = DOWN); ties (delta === 0) resolve to 0. Appended to
   `signals.json` as `{type:'OBSERVATION', asset, entryAt, entryPrice,
@@ -247,7 +247,29 @@ enable delivery), `SIGNAL_COOLDOWN_MS` (300000).
   there. Without this, `autoDeploy: true` wiped every collected label on each
   push. Verified: `docker stop` flushed 18 labels (exit 0), the files survived on
   the volume, and a restart resumed them ("resumed 18 label(s)").
-- **Still missing:** no LICENSE file; the `momentum60s` feature duplicates
-  `netChangePct`; retraining is time-based, not triggered by data growth.
-  **The baseline remains a placeholder with no claimed edge, and the pipeline
-  still has no evidence of a real edge — validation is only as good as the data.**
+- **Feature bugs fixed 2026-10-17 (both were real, both verified).**
+  * `upRatio` divided UP ticks by the *total* tick count, but ~30% of ticks
+    repeat the previous price (FLAT). The feature therefore sat near 0.365
+    instead of ~0.5, reading as a permanent DOWN bias. It now divides by
+    directional ticks only (`up / (up + down)`), and an all-FLAT window is the
+    neutral 0.5 rather than 0. Live check after the fix: mean 0.509.
+  * `momentum60s` was computed with the *identical* formula to `netChangePct`
+    (`(close - open) / open`) — equal in 252/252 rows, so it was a duplicate
+    column that only split feature importance. Worse, `predictor.ts` used it as
+    `momentum60s / open / volScale`, which re-injected the raw price level that
+    `features.py` exists to remove. It is now `recentMomentumPct` — the return
+    over the recent half of the window — a genuinely different quantity.
+  * The 252-row dataset collected before this fix carries the old schema and is
+    archived at `price-bot/archive/signals-pre-featurefix.json`. It is not
+    comparable to new data and must not be mixed with it.
+- **`train.py` now prints a shuffled-label null control.** It refits the same
+  feature set on permuted labels and reports the null AUC spread plus an
+  empirical p-value, which is what makes a held-out AUC interpretable. Validated
+  in both directions: on the real (pre-fix) data it reports INSIDE the null
+  spread (real 0.5508 vs null [0.373, 0.613], p=0.40 → no signal), and on
+  synthetic data with a planted relationship it reports ABOVE the spread
+  (real 1.0000, p=0.000). It is a working test, not a rubber stamp.
+- **Still missing:** no LICENSE file; retraining is time-based, not triggered by
+  data growth. **The baseline remains a placeholder with no claimed edge, and
+  the pipeline still has no evidence of a real edge — validation is only as good
+  as the data.**

@@ -350,6 +350,71 @@ def _report_metrics(
     print(f"  confusion matrix [[tn fp],[fn tp]]: {confusion_matrix(y_te, pred).tolist()}")
 
 
+def _permutation_baseline(
+    X_tr: np.ndarray,
+    y_tr: np.ndarray,
+    X_te: np.ndarray,
+    y_te: np.ndarray,
+    seed: int,
+    n_perm: int = 10,
+) -> np.ndarray:
+    """AUC of models trained on the *same features* with shuffled labels.
+
+    This is the control that makes a held-out AUC interpretable. Shuffling
+    destroys any real relationship between features and outcome, so whatever
+    AUC these models reach is the score a model can get from this feature set
+    *by chance at this sample size*. If the real model's AUC sits inside this
+    spread, it has learned nothing the noise would not also produce.
+
+    Returns the array of null AUCs (empty if the test set is single-class).
+    """
+    rng = np.random.default_rng(seed)
+    null_aucs: list[float] = []
+    for _ in range(n_perm):
+        shuffled = rng.permutation(y_tr)
+        # A permutation can land on a single class; skip those folds rather
+        # than let the forest fit a degenerate boundary.
+        if len(set(shuffled.tolist())) < 2:
+            continue
+        m = build_model(seed)
+        m.fit(X_tr, shuffled)
+        proba = m.predict_proba(X_te)[:, 1]
+        try:
+            null_aucs.append(roc_auc_score(y_te, proba))
+        except ValueError:
+            continue
+    return np.asarray(null_aucs, dtype=float)
+
+
+def _report_permutation(
+    y_te: np.ndarray, real_auc: float, null_aucs: np.ndarray
+) -> None:
+    """Print the real AUC against the shuffled-label null distribution."""
+    if len(null_aucs) == 0:
+        print("\n[perm] skipped (test set unusable for a null distribution)")
+        return
+
+    lo = float(np.percentile(null_aucs, 5))
+    hi = float(np.percentile(null_aucs, 95))
+    mean = float(null_aucs.mean())
+    # Two-sided empirical p: how often the null reaches the real score.
+    p_value = float((np.abs(null_aucs - 0.5) >= abs(real_auc - 0.5)).mean())
+
+    print("\n[perm] shuffled-label control (does the feature set beat chance?)")
+    print(f"  real roc_auc        : {real_auc:.4f}")
+    print(f"  null roc_auc mean   : {mean:.4f}  [5th, 95th] = [{lo:.4f}, {hi:.4f}]")
+    print(f"  empirical p-value   : {p_value:.3f}  (n_perm={len(null_aucs)})")
+    if lo <= real_auc <= hi:
+        print("  => INSIDE the null spread. The model is indistinguishable from")
+        print("     chance on this feature set and sample size. Treat any edge")
+        print("     it appears to show as noise.")
+    elif real_auc > hi:
+        print("  => ABOVE the null spread — the features carry signal beyond chance.")
+        print("     Still confirm on out-of-sample data before trusting it.")
+    else:
+        print("  => BELOW the null spread — worse than chance; check for a bug.")
+
+
 def train(
     data_path: Path,
     model_path: Path,
@@ -439,6 +504,17 @@ def train(
             y_te, proba, ds.range_pct[test_idx], payout,
             min_confidence, no_trade_low, no_trade_high, max_volatility,
         )
+
+        # The control that makes the AUC above interpretable: fit the same
+        # feature set on shuffled labels and compare. Reported for the raw
+        # forest, since the calibrator is a monotone map that leaves ranking
+        # (and therefore AUC) unchanged.
+        raw_auc = roc_auc_score(y_te, raw) if len(set(y_te.tolist())) == 2 else float("nan")
+        if math.isfinite(raw_auc):
+            null_aucs = _permutation_baseline(
+                ds.X[fit_idx], ds.y[fit_idx], X_te, y_te, seed
+            )
+            _report_permutation(y_te, raw_auc, null_aucs)
 
         print(f"  baseline (always predict majority): {max(pos, neg) / n:.4f}")
         if n < MIN_ROWS_FOR_MEANINGFUL_METRICS:

@@ -89,7 +89,7 @@ curl -s localhost:8000/predict -H 'Content-Type: application/json' -d '{
                "netChangePct": -1.7e-5, "range": 1.8e-4,
                "avgAbsDelta": 1.47e-5, "stdDev": 4.18e-5,
                "upRatio": 0.414, "windowSpanSec": 39.06,
-               "momentum60s": -1.7e-5}
+               "recentMomentumPct": 3.1e-5}
 }'
 ```
 ```json
@@ -112,9 +112,9 @@ serving so the two can never drift:
 | `rangePct` | `range / open` |
 | `avgAbsDeltaPct` | `avgAbsDelta / open` |
 | `stdDevPct` | `stdDev / open` |
-| `upRatio` | |
+| `upRatio` | share of directional ticks that were UP (FLAT excluded) |
 | `windowSpanSec` | |
-| `momentum60s` | |
+| `recentMomentumPct` | return over the recent half of the window (distinct from `netChangePct`) |
 | `asset_*` | one-hot across the 6 OTC pairs |
 
 **Raw price levels are deliberately excluded.** The pairs trade at wildly

@@ -56,7 +56,7 @@ function feat(over: Partial<FeatureWindow> = {}): FeatureWindow {
     stdDev: 0,
     upRatio: 0.5,
     windowSpanSec: 59,
-    momentum60s: 0,
+    recentMomentumPct: 0,
     ...over,
   };
 }
@@ -257,6 +257,74 @@ section('collector — windowing, bucket dedup, horizon resolution');
 }
 
 // ============================================================
+section('features — upRatio ignores FLAT ticks; momentum is not a duplicate');
+// ============================================================
+{
+  const asset = 'EURUSD_otc';
+  const BASE = 1_789_863_600_000;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'feat-'));
+
+  // Capture the feature window the collector emits at a bucket boundary.
+  const captureWindow = (ticks: Tick[]): any => {
+    const col = new FeatureLabelCollector({
+      signalsFile: path.join(tmp, 's.json'),
+      featuresFile: path.join(tmp, 'f.json'),
+    });
+    let seen: any = null;
+    col.onBucketBoundary((_a, f) => { seen = f; });
+    // One evaluate per tick, replaying a growing snapshot like the live loop.
+    for (let i = 0; i < ticks.length; i++) {
+      col.evaluate({ price: ticks[i].price, candles: [], ticks: ticks.slice(0, i + 1), serverTime: ticks[i].timestamp }, asset);
+    }
+    // Cross a bucket boundary so the window is emitted.
+    const last = ticks[ticks.length - 1];
+    col.evaluate({ price: last.price, candles: [], ticks, serverTime: BASE + 60001 }, asset);
+    return seen;
+  };
+
+  // A window whose ticks are mostly FLAT must not read as "mostly down".
+  // 3 UP, 1 DOWN, 20 FLAT -> directional ratio is 0.75, not 3/24 = 0.125.
+  // Timestamps span the full window so the minCoverage gate does not skip it.
+  const spread = (n: number, i: number) => BASE + 1000 + Math.round((i * 58000) / (n - 1));
+  const mixed: Tick[] = [];
+  let px = 1.15;
+  for (let i = 0; i < 24; i++) {
+    let dir: 'UP' | 'DOWN' | 'FLAT';
+    if (i < 3) { px += 1e-5; dir = 'UP'; }
+    else if (i < 4) { px -= 1e-5; dir = 'DOWN'; }
+    else { dir = 'FLAT'; }
+    mixed.push({ assetId: asset, price: px, timestamp: spread(24, i), direction: dir });
+  }
+  const f = captureWindow(mixed);
+  check('window emitted', f !== null);
+  check('upRatio excludes FLAT ticks (0.75, not 0.125)', Math.abs(f.upRatio - 0.75) < 1e-9);
+  check('upRatio stays in [0,1]', f.upRatio >= 0 && f.upRatio <= 1);
+
+  // All-flat window is neutral, not "all down".
+  const flatOnly: Tick[] = Array.from({ length: 10 }, (_, i) => ({
+    assetId: asset, price: 1.15, timestamp: spread(10, i), direction: 'FLAT' as const,
+  }));
+  const ff = captureWindow(flatOnly);
+  check('all-FLAT window is neutral (0.5)', Math.abs(ff.upRatio - 0.5) < 1e-9);
+
+  // recentMomentumPct must differ from netChangePct: a window that falls then
+  // recovers ends flat (netChangePct ~ 0) but has positive recent momentum.
+  const vShape: Tick[] = [];
+  for (let i = 0; i < 20; i++) {
+    const p = i < 10 ? 1.15 - i * 1e-5 : 1.15 - (20 - i) * 1e-5;
+    vShape.push({ assetId: asset, price: p, timestamp: spread(20, i), direction: p > 1.15 ? 'UP' : 'DOWN' });
+  }
+  const fv = captureWindow(vShape);
+  check('recentMomentumPct is present', typeof fv.recentMomentumPct === 'number');
+  check(
+    'recentMomentumPct is not a copy of netChangePct',
+    Math.abs(fv.recentMomentumPct - fv.netChangePct) > 1e-9
+  );
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// ============================================================
 section('predictor — baseline always answers, router falls back');
 // ============================================================
 {
@@ -272,20 +340,20 @@ section('predictor — baseline always answers, router falls back');
   // Rising window -> UP.
   const up = await local.predict('EURUSD_otc', feat({
     open: 1.15, close: 1.1510, netChangePct: 0.00087,
-    momentum60s: 0.0009, upRatio: 0.9, stdDev: 1e-5,
+    recentMomentumPct: 0.0009, upRatio: 0.9, stdDev: 1e-5,
   }));
   check('rising window predicts UP', up.probability > 0.5 && up.direction === 1);
 
   // Falling window -> DOWN.
   const down = await local.predict('EURUSD_otc', feat({
     open: 1.15, close: 1.1490, netChangePct: -0.00087,
-    momentum60s: -0.0009, upRatio: 0.1, stdDev: 1e-5,
+    recentMomentumPct: -0.0009, upRatio: 0.1, stdDev: 1e-5,
   }));
   check('falling window predicts DOWN', down.probability < 0.5 && down.direction === 0);
 
   // Extremes must stay inside [0.02, 0.98] — a placeholder has no certainty.
   const extreme = await local.predict('EURUSD_otc', feat({
-    open: 1.15, close: 1.30, netChangePct: 0.5, momentum60s: 0.5,
+    open: 1.15, close: 1.30, netChangePct: 0.5, recentMomentumPct: 0.5,
     upRatio: 1.0, stdDev: 1e-9,
   }));
   check('probability clamped <= 0.98', extreme.probability <= 0.98);
@@ -293,7 +361,7 @@ section('predictor — baseline always answers, router falls back');
 
   // Degenerate inputs must not produce NaN.
   const nan = await local.predict('EURUSD_otc', feat({
-    open: 0, stdDev: 0, netChangePct: NaN, momentum60s: NaN, upRatio: NaN,
+    open: 0, stdDev: 0, netChangePct: NaN, recentMomentumPct: NaN, upRatio: NaN,
   }));
   check('degenerate window yields finite probability', Number.isFinite(nan.probability));
   check('degenerate window stays in range', nan.probability >= 0.02 && nan.probability <= 0.98);
