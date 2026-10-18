@@ -497,6 +497,7 @@ def train(
     no_trade_high: float,
     max_volatility: float,
     n_perm: int = 10,
+    refit_full: bool = False,
 ) -> int:
     print(f"[data] loading {data_path}")
     ds = load_dataset(data_path)
@@ -601,8 +602,33 @@ def train(
         # Persist the calibrated model so serving applies the same map. The
         # isotonic step is bundled with the forest so `predict_proba` downstream
         # stays a single call.
+        #
+        # By default we save the model that produced the metrics above, which was
+        # fit on `fit_idx` only — a fraction of the data. That is honest, but it
+        # discards the rest. `--refit-full` refits the forest on every non-test
+        # row (still excluding the purged band and the test period, so the
+        # reported metrics remain valid). The calibrator is *reused*, not refit:
+        # it was fit out-of-sample on `cal_idx`, and refitting it here would fit
+        # it on rows the forest had already seen — in-sample isotonic is
+        # over-confident, which is exactly the failure the calibrator exists to
+        # avoid. Reusing the out-of-sample map keeps calibration honest while the
+        # forest still sees all available rows. Deployment-only; evaluation is
+        # unaffected.
+        if refit_full:
+            deploy_model = build_model(seed)
+            deploy_model.fit(ds.X[train_idx], ds.y[train_idx])
+            deploy_calib = calibrator
+            print(
+                f"[save] --refit-full: forest refit on {len(train_idx)} rows "
+                f"(was {len(fit_idx)}); calibrator reused from the purged slice"
+            )
+        else:
+            deploy_model, deploy_calib = model, calibrator
+
         model_path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(CalibratedModel(model, calibrator, FEATURE_NAMES), model_path)
+        joblib.dump(
+            CalibratedModel(deploy_model, deploy_calib, FEATURE_NAMES), model_path
+        )
         print(f"\n[save] wrote {model_path} ({model_path.stat().st_size} bytes)")
 
     return 0
@@ -837,6 +863,13 @@ def main() -> int:
     parser.add_argument(
         "--max-volatility", type=float, default=DEFAULT_MAX_VOLATILITY_PCT
     )
+    parser.add_argument(
+        "--refit-full",
+        action="store_true",
+        help="after evaluating on the held-out split, refit the saved model on "
+        "all non-test rows so deployment uses the whole dataset. The reported "
+        "metrics are unchanged (they still come from the held-out fit).",
+    )
     args = parser.parse_args()
 
     try:
@@ -844,7 +877,7 @@ def main() -> int:
             args.data, args.model, args.test_size, args.seed, args.min_rows,
             args.walk_forward, args.folds, args.embargo_ms, args.payout,
             args.min_confidence, args.no_trade_low, args.no_trade_high,
-            args.max_volatility, args.permutations,
+            args.max_volatility, args.permutations, args.refit_full,
         )
     except (FileNotFoundError, ValueError) as e:
         print(f"[error] {e}", file=sys.stderr)

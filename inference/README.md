@@ -74,7 +74,15 @@ survive the filters, with an interval that says how much to trust it.
 python train.py --walk-forward --folds 5          # walk-forward + economic harness
 python train.py --payout 0.92 --min-confidence 0.65
 python train.py --walk-forward --permutations 200 # finer p-value (slow)
+python train.py --refit-full                       # deploy model on all non-test rows
 ```
+
+By default the saved model is the one that produced the metrics — fit on the
+training slice only, so it discards the rest. `--refit-full` refits the forest
+on every non-test row after evaluation (metrics unchanged), so the deployed
+model uses the whole dataset. The retrain loop passes it. The calibrator is
+reused rather than refit: it was fit out-of-sample, and refitting it on rows the
+forest had seen would make the isotonic map over-confident.
 
 The artifact written to `model.pkl` is a `CalibratedModel` (forest + optional
 calibrator) from `model_bundle.py`, so `/predict` serves calibrated

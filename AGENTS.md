@@ -147,8 +147,9 @@ python train.py --data ../price-bot/signals.json # fit model.pkl (chronological 
 python train.py --data ../price-bot/signals.json --walk-forward --folds 5
 ```
 
-CI (`.github/workflows/ci.yml`) runs typecheck + `npm test` on Node, and a
-Python compile + train smoke test on a synthetic dataset.
+CI (`.github/workflows/ci.yml`) runs typecheck + `npm test` on Node, and on
+Python: compile, the unit tests (`test_train.py` + `test_app.py`), then a train
+smoke test on a synthetic dataset.
 
 Inference env vars: `INFERENCE_URL` (unset = baseline predictor only),
 `INFERENCE_TIMEOUT_MS` (5000), `MODEL_FILE` (./model.pkl),
@@ -323,3 +324,13 @@ enable delivery), `SIGNAL_COOLDOWN_MS` (300000).
   data growth. **The baseline remains a placeholder with no claimed edge. The
   pipeline has one weak, unconfirmed hint of signal at a 180s horizon and
   nothing more — validation is only as good as the data.**
+- **The deployed model used to be fit on a subset of the data.** The retrain
+  loop called `train.py` without `--walk-forward`, which takes the holdout
+  branch and saves the model fit on `fit_idx` — 80% of `train_idx`, i.e. ~67% of
+  all rows. Nothing documented that. `--refit-full` (now passed by the retrain
+  loop) refits the forest on all of `train_idx` after evaluation, so deployment
+  uses ~80% of rows while the reported metrics stay exactly the same (they still
+  come from the held-out fit). The calibrator is reused, not refit: refitting it
+  on rows the forest had already seen would fit an in-sample isotonic map, which
+  is over-confident — the exact failure the calibrator exists to prevent. Test
+  pins the artifact: the saved model's first tree sees more rows with the flag.

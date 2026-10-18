@@ -17,10 +17,17 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import joblib
 from sklearn.metrics import roc_auc_score
 
 from features import FEATURE_NAMES
-from train import Dataset, _report_block_null, chronological_split, load_dataset
+from train import (
+    Dataset,
+    _report_block_null,
+    chronological_split,
+    load_dataset,
+    train,
+)
 
 # A plausible 60s spacing between observations, as the collector produces.
 STEP_MS = 60_000
@@ -248,6 +255,75 @@ class TestBlockNull(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             _report_block_null(y, p, real, n_shift=300, seed=1)
         self.assertIn("survives the stricter block null", buf.getvalue())
+
+
+class TestRefitFull(unittest.TestCase):
+    """`--refit-full` must make the *saved* model use more rows than the one that
+    produced the metrics, without changing the metrics. Pinned on the artifact,
+    not on the log line, because the failure mode is a model silently trained on
+    a subset."""
+
+    def _write(self, records: list[dict]) -> Path:
+        fh = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        json.dump(records, fh)
+        fh.close()
+        self.addCleanup(Path(fh.name).unlink, missing_ok=True)
+        return Path(fh.name)
+
+    def _records(self, n: int) -> list[dict]:
+        rng = np.random.default_rng(0)
+        base = 1_789_863_600_000
+        recs = []
+        for i in range(n):
+            x = float(rng.normal(0, 1))
+            recs.append({
+                "type": "OBSERVATION",
+                "asset": "EURUSD_otc",
+                "entryAt": base + i * STEP_MS,
+                "resolvedAt": base + i * STEP_MS + 60_000,
+                "entryPrice": 1.15,
+                "expirationPrice": 1.1501,
+                "delta": 1e-4,
+                "label": 1 if x > 0 else 0,
+                "outcome": "UP" if x > 0 else "DOWN",
+                "features": {
+                    "open": 1.15, "tickCount": 100, "netChangePct": x * 1e-3,
+                    "range": 1e-4, "avgAbsDelta": 1e-5, "stdDev": 2e-5,
+                    "upRatio": 0.5, "windowSpanSec": 59.0,
+                    "recentMomentumPct": x * 1e-4,
+                },
+                "source": "test",
+            })
+        return recs
+
+    def _run(self, data: Path, model: Path, refit: bool) -> None:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = train(
+                data, model, 0.2, 42, 10, False, 5, 60_000, 0.92,
+                0.65, 0.36, 0.64, 0.02, 5, refit,
+            )
+        self.assertEqual(rc, 0, buf.getvalue())
+
+    @staticmethod
+    def _rows_seen(model_path: Path) -> int:
+        """Root node sample count of the first tree == training-set size."""
+        bundle = joblib.load(model_path)
+        return int(bundle.model.estimators_[0].tree_.n_node_samples[0])
+
+    def test_refit_full_trains_the_saved_model_on_more_rows(self):
+        data = self._write(self._records(250))
+        with tempfile.TemporaryDirectory() as td:
+            plain = Path(td) / "plain.pkl"
+            full = Path(td) / "full.pkl"
+            self._run(data, plain, refit=False)
+            self._run(data, full, refit=True)
+            n_plain = self._rows_seen(plain)
+            n_full = self._rows_seen(full)
+        self.assertGreater(
+            n_full, n_plain,
+            "refit-full saved a model that did not see more rows than the default",
+        )
 
 
 if __name__ == "__main__":

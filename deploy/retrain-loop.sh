@@ -27,7 +27,9 @@ while true; do
   fi
 
   # Capture output so a refusal is summarised rather than spamming every cycle.
-  if out=$(/app/venv/bin/python /app/inference/train.py --data "$SIGNALS" --model "$MODEL" 2>&1); then
+  # --refit-full: evaluate on the held-out split as usual, then refit the saved
+  # model on every non-test row so the deployed model uses the whole dataset.
+  if out=$(/app/venv/bin/python /app/inference/train.py --data "$SIGNALS" --model "$MODEL" --refit-full 2>&1); then
     log "trained OK -> ${MODEL}"
     echo "$out" | grep -E '^\[(save|eval|walk|split|calib)' || true
   else
