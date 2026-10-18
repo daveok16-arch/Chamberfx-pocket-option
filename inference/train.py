@@ -693,6 +693,7 @@ def _walk_forward(
                 ds, test_size, seed, folds, embargo_ms, n_perm=n_perm,
             )
             _report_permutation(pooled_y, pooled_auc, null_pooled)
+            _report_block_null(pooled_y, pooled_p, pooled_auc)
 
 
 def _walk_forward_null(
@@ -734,6 +735,50 @@ def _walk_forward_null(
         except ValueError:
             continue
     return np.asarray(null_aucs, dtype=float)
+
+
+def _report_block_null(
+    y: np.ndarray, p: np.ndarray, real_auc: float, n_shift: int = 1000, seed: int = 0
+) -> None:
+    """Second control: a circular-shift null on the *already-computed* predictions.
+
+    The shuffled-label control assumes observations are exchangeable. Overlapping
+    windows are autocorrelated, so that assumption is false and the shuffle can
+    make the null too tight. A circular shift rotates the label series against
+    the fixed predictions, preserving the label autocorrelation, so it is a
+    stricter null. No model refits — it reuses `p` — so it costs nothing.
+
+    If the real AUC clears both nulls, the signal is not a shuffle artifact. If
+    it clears the i.i.d. null but not this one, treat it as autocorrelation.
+    """
+    if len(y) < 10 or len(set(y.tolist())) < 2:
+        return
+    rng = np.random.default_rng(seed)
+    shifts = np.empty(n_shift, dtype=float)
+    for i in range(n_shift):
+        k = int(rng.integers(1, len(y)))
+        try:
+            shifts[i] = roc_auc_score(np.roll(y, k), p)
+        except ValueError:
+            shifts[i] = float("nan")
+    shifts = shifts[np.isfinite(shifts)]
+    if len(shifts) == 0:
+        return
+    p_value = float((np.abs(shifts - 0.5) >= abs(real_auc - 0.5)).mean())
+    lo = float(np.percentile(shifts, 5))
+    hi = float(np.percentile(shifts, 95))
+    print(
+        f"[perm] block null (circular shift, keeps autocorrelation): "
+        f"mean={shifts.mean():.4f} [5,95]=[{lo:.4f},{hi:.4f}] p={p_value:.3f} "
+        f"(n={len(shifts)})"
+    )
+    if p_value <= 0.05:
+        print("  => survives the stricter block null too — not a shuffle artifact.")
+    else:
+        print(
+            "  => does NOT clear the block null. The i.i.d. p-value was likely "
+            "too optimistic; treat the signal as unproven."
+        )
 
 
 def main() -> int:

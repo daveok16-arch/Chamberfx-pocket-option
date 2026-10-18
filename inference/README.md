@@ -59,7 +59,12 @@ sides of the split — and reports an optimistic score. Training instead:
    p-value. On `--walk-forward` the control is computed on the *pooled*
    out-of-sample predictions from every fold, which is far better powered than a
    20% holdout — at n=240 the holdout says p=0.367 while the pooled control says
-   p=0.015 on the same data.
+   p=0.015 on the same data;
+7. prints a second, stricter **block null** (circular shift of the labels against
+   the fixed predictions). A label shuffle assumes observations are exchangeable,
+   which overlapping windows are not, so it can be too permissive. The block null
+   keeps the autocorrelation and needs no refits. Clearing the i.i.d. null alone
+   is not enough; the block null is the one to trust.
 
 Accuracy is not the objective. At a 0.92 payout the break-even win rate is
 **0.5208**; the only meaningful number is the win rate of the signals that

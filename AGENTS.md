@@ -303,6 +303,17 @@ enable delivery), `SIGNAL_COOLDOWN_MS` (300000).
   says p=0.015. Same data, same model; only the number of test rows differs.
   When they disagree, the pooled number is the better read. `--permutations N`
   tunes the null resolution; each permutation is a full refit.
+- **The pooled control is i.i.d., and that is a known weakness.** A label
+  shuffle assumes observations are exchangeable, but consecutive overlapping
+  windows are autocorrelated, so the shuffle destroys a structure the data
+  actually has and can make the null too tight. So the walk-forward path prints
+  a **second control**: a circular-shift (block) null that rotates the label
+  series against the fixed predictions, preserving the autocorrelation. It
+  reuses the predictions and needs no refits, so it is free. On the 180s data:
+  real pooled AUC 0.618, i.i.d. p=0.001, block p=0.040 — the signal survives
+  both, so it is not a shuffle artifact. Read them together: clearing the i.i.d.
+  null alone is not enough; the block null is the stricter one. (Circular shift
+  is the cheap block null; a full block-bootstrap would be stricter still.)
 - **Overlapping labels at long horizons:** window=60s with horizon=180s means
   consecutive observations share 2/3 of their outcome window, so 240 rows are
   not 240 independent samples. The permutation null is built with the *same*

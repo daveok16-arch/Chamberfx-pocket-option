@@ -17,9 +17,10 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+from sklearn.metrics import roc_auc_score
 
 from features import FEATURE_NAMES
-from train import Dataset, chronological_split, load_dataset
+from train import Dataset, _report_block_null, chronological_split, load_dataset
 
 # A plausible 60s spacing between observations, as the collector produces.
 STEP_MS = 60_000
@@ -220,6 +221,33 @@ class TestSchemaDriftGuard(unittest.TestCase):
         out = self._run(recs)
         self.assertIn("SCHEMA DRIFT", out)
         self.assertIn("recentMomentumPct", out)
+
+
+class TestBlockNull(unittest.TestCase):
+    """The block null must not claim significance when the predictions carry no
+    information, and must claim it when they do. It reuses predictions, so a
+    bug here is silent — it never raises, it just prints the wrong verdict."""
+
+    def test_pure_noise_is_not_significant(self):
+        rng = np.random.default_rng(0)
+        y = rng.integers(0, 2, 200)
+        p = rng.random(200)
+        real = roc_auc_score(y, p)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _report_block_null(y, p, real, n_shift=300, seed=1)
+        self.assertIn("does NOT clear the block null", buf.getvalue())
+
+    def test_real_signal_is_significant(self):
+        rng = np.random.default_rng(0)
+        y = rng.integers(0, 2, 400)
+        # Predictions aligned with labels -> AUC well above 0.5.
+        p = np.where(y == 1, rng.uniform(0.6, 1.0, 400), rng.uniform(0.0, 0.4, 400))
+        real = roc_auc_score(y, p)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _report_block_null(y, p, real, n_shift=300, seed=1)
+        self.assertIn("survives the stricter block null", buf.getvalue())
 
 
 if __name__ == "__main__":
