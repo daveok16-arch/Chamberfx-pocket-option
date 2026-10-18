@@ -602,7 +602,7 @@ def train(
         # isotonic step is bundled with the forest so `predict_proba` downstream
         # stays a single call.
         model_path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(CalibratedModel(model, calibrator), model_path)
+        joblib.dump(CalibratedModel(model, calibrator, FEATURE_NAMES), model_path)
         print(f"\n[save] wrote {model_path} ({model_path.stat().st_size} bytes)")
 
     return 0

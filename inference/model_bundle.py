@@ -24,11 +24,25 @@ import numpy as np
 
 
 class CalibratedModel:
-    """A fitted estimator plus an optional probability calibrator."""
+    """A fitted estimator plus an optional probability calibrator.
 
-    def __init__(self, model: Any, calibrator: Any = None) -> None:
+    `feature_names` records the exact feature order the model was trained on.
+    A count check alone is not enough: after a feature rename the vector still
+    has the same length, so a model trained on the old schema would score a
+    column that now means something else and quietly return plausible numbers.
+    Serving compares names against the incoming contract and refuses on a
+    mismatch.
+    """
+
+    def __init__(
+        self,
+        model: Any,
+        calibrator: Any = None,
+        feature_names: list[str] | None = None,
+    ) -> None:
         self.model = model
         self.calibrator = calibrator
+        self.feature_names = feature_names
 
     @property
     def n_features_in_(self) -> Any:

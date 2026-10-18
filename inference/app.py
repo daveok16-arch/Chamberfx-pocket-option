@@ -151,8 +151,20 @@ def predict(req: PredictRequest) -> PredictResponse:
 
     X = np.asarray([vector], dtype=float)
 
-    # Guard the model/feature contract drifting apart (e.g. a model trained
-    # before a feature was added would silently score the wrong columns).
+    # Guard the model/feature contract drifting apart. A count check alone
+    # misses a rename — the vector keeps its length, so the model would score a
+    # column that now means something else. When the bundle carries the training
+    # feature names, compare them; a bare estimator only supports the count.
+    trained_names = getattr(model, "feature_names", None)
+    if trained_names is not None and list(trained_names) != list(FEATURE_NAMES):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Feature mismatch: model was trained on "
+                f"{list(trained_names)}, service expects {list(FEATURE_NAMES)}. "
+                "Retrain with the current features.py."
+            ),
+        )
     expected = getattr(model, "n_features_in_", None)
     if expected is not None and X.shape[1] != expected:
         raise HTTPException(

@@ -76,6 +76,12 @@ with its own safety design.
   `model.pkl`: the forest plus its optional isotonic calibrator. Lives in its own
   module (not `train.py`) so `joblib` can unpickle it in the serving process;
   exposes `n_features_in_`/`predict_proba` so `app.py` needs no special-casing.
+  Also carries `feature_names` (the training schema) so serving can refuse a
+  renamed-feature model, not just a wrong-width one.
+- `inference/test_app.py` -- `python -m unittest test_app`. The `/predict`
+  contract: matching schema scores, a renamed feature 409s, a wrong width 409s,
+  no model 503s. No HTTP client (the endpoint function is called directly with a
+  stub model), so it adds no dependency.
 - `price-bot/tests/run.ts` -- `npm test`. Zero-dependency harness covering the
   filter boundaries, candle/normalize/dedup behavior, and collector invariants
   (one arm per bucket, 60s horizon, resume-from-disk, monotonic bucket guard,
