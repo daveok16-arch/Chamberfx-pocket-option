@@ -200,13 +200,26 @@ def load_dataset(path: Path) -> Dataset:
     entry_at = np.asarray([r[0] for r in rows], dtype=np.int64)
     range_pct = np.asarray([r[4] for r in rows], dtype=float)
 
-    # Median is robust to a few malformed/rounding outliers in the horizon.
-    horizon_ms = int(np.median(horizons)) if horizons else HORIZON_MS
-    if horizons and len(set(horizons)) > 1:
-        print(
-            f"[data] mixed label horizons {sorted(set(horizons))}ms — "
-            f"using median {horizon_ms}ms for the purge"
+    # A label resolves on the first tick at/after the horizon, so a "180s"
+    # horizon lands at 180005ms, 180467ms, sometimes 194628ms — normal tick
+    # jitter, not a different horizon. Bucket to whole minutes so jitter
+    # collapses to one bucket while a real horizon change (60 -> 180) shows up
+    # as two. Training one model on two horizons would answer two different
+    # questions with one set of weights.
+    buckets: dict[int, int] = {}
+    for h in horizons:
+        buckets[round(h / 60_000)] = buckets.get(round(h / 60_000), 0) + 1
+    if len(buckets) > 1:
+        detail = ", ".join(
+            f"{m}min x{c}" for m, c in sorted(buckets.items(), key=lambda t: -t[1])
         )
+        raise ValueError(
+            f"Dataset mixes label horizons ({detail}). A signals.json that spans a "
+            "horizon change cannot be trained as one model — it is two different "
+            "prediction problems in one file. Archive or split it, or point --data "
+            "at a single-horizon file."
+        )
+    horizon_ms = int(np.median(horizons)) if horizons else HORIZON_MS
     print(f"[data] label horizon: {horizon_ms}ms (measured from resolvedAt-entryAt)")
 
     return Dataset(X, y, assets, entry_at, range_pct, horizon_ms)

@@ -131,6 +131,33 @@ class TestHorizonMeasurement(unittest.TestCase):
         self.assertEqual(ds.horizon_ms, 60_000)
 
 
+    def test_jittered_horizons_do_not_count_as_mixed(self):
+        """A 180s label lands at 180005/180467/194628ms — tick jitter, one
+        horizon. It must not be treated as a mix."""
+        base = 1_789_863_600_000
+        jitter = [0, 5, 467, 1_500, 14_628, 899]
+        recs = [
+            self._record(base + i * STEP_MS, base + i * STEP_MS + 180_000 + jitter[i % len(jitter)], i % 2)
+            for i in range(20)
+        ]
+        ds = load_dataset(self._write(recs))
+        self.assertEqual(round(ds.horizon_ms / 60_000), 3)
+
+    def test_true_mixed_horizons_are_refused(self):
+        """A file spanning a 60s -> 180s change is two problems in one file."""
+        base = 1_789_863_600_000
+        recs = [
+            self._record(base + i * STEP_MS, base + i * STEP_MS + 60_000, i % 2)
+            for i in range(10)
+        ] + [
+            self._record(base + (10 + i) * STEP_MS, base + (10 + i) * STEP_MS + 180_000, i % 2)
+            for i in range(10)
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            load_dataset(self._write(recs))
+        self.assertIn("mixes label horizons", str(ctx.exception))
+
+
 class TestSchemaDriftGuard(unittest.TestCase):
     """The guard must fire on genuinely-absent raw keys and stay quiet on keys
     that `build_vector` derives (rangePct etc.), which never appear in records.

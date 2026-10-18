@@ -13,6 +13,7 @@
 #
 # Environment:
 #   PERIOD                — candle period in seconds: 60 | 180 | 300 (default 60)
+#   HORIZON               — label horizon in seconds: 60 | 180 | 300 (default 60)
 #   RETRAIN_INTERVAL_SEC  — how often the retrain loop runs (default 1800)
 #   TELEGRAM_BOT_TOKEN    — set in the dashboard (sync: false) to enable delivery
 #   TELEGRAM_CHAT_ID      — set in the dashboard (sync: false) to enable delivery
@@ -38,6 +39,16 @@ services:
       - key: PORT
         value: 10000
       - key: PERIOD
+        value: "60"
+      # Label horizon in seconds: 60 | 180 | 300. Independent of PERIOD (which
+      # sets the candle size); the feature window stays 60s either way.
+      #
+      # Kept at 60 to match the existing dataset. Switching to 180 invalidates
+      # it: a signals.json that spans a horizon change holds two different
+      # prediction problems, and train.py now refuses such a file rather than
+      # silently training one model on both. To switch, archive the current
+      # signals.json on the disk and let a fresh one accumulate.
+      - key: HORIZON
         value: "60"
       # The dataset and the trained model live on the mounted disk, so a
       # redeploy does not wipe the observations collected since the last push.

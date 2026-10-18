@@ -64,6 +64,7 @@ RUN useradd -m botuser && chown -R botuser:botuser /app
 ENV NODE_ENV=production \
     PORT=10000 \
     PERIOD=60 \
+    HORIZON=60 \
     DATA_DIR=/app/data \
     MODEL_FILE=/app/data/model.pkl \
     SIGNALS_FILE=/app/data/signals.json \
