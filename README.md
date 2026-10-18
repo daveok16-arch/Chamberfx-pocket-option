@@ -319,6 +319,50 @@ Python inference service, and a periodic retrain loop, all under supervisord.
 4. Add a **persistent disk** mounted at `/app/data` (1 GB is plenty). Without it, `autoDeploy` wipes the dataset on every push.
 5. Deploy.
 
+### Checking a deployed service
+
+The dashboard shows the blueprint's *intended* config, not what the service is
+actually running. Read the service back before assuming:
+
+```
+S=srv-...   # service id
+curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+  "https://api.render.com/v1/services/$S" | python3 -m json.tool | grep -E 'plan|healthCheckPath'
+curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+  "https://api.render.com/v1/services/$S/env-vars?limit=100"
+curl -s "https://<service>.onrender.com/health" | python3 -m json.tool
+```
+
+`/health` is the fastest end-to-end signal: `connected: true` with a non-zero
+`assets` means ticks are flowing, `predictionStats.total` means windows are being
+scored, and `telegram.sent` / `telegram.failed` / `telegram.throttled` tell you
+whether signals are leaving the box.
+
+### Known gotcha: free plan silently breaks the always-on guarantee
+
+A service created on the **free** plan (or with a blueprint edited in the
+dashboard) will look healthy and still violate the core requirement:
+
+- Free instances **spin down when idle**. Capture stops; the WebSocket drops and
+  is not re-established until the next inbound request. `uptime` on `/health`
+  resets and signal delivery goes quiet between requests.
+- Free instances have **no persistent disk**, so `signals.json` and `model.pkl`
+  under `/app/data` are wiped on every deploy. The retrain loop restarts from
+  zero each time and `/predict` answers 503 until a model is retrained.
+- 512 MB is below what Chromium plus scikit-learn need; expect OOM kills.
+
+If the requirement is a prediction for *every* 60s window, continuously, the
+service must run on `standard` (or higher) with a disk at `/app/data`. Verify
+with the read-back commands above — do not trust the blueprint alone.
+
+### Delivery cadence
+
+A 6-asset, 60s cadence produces at most one batched message per minute
+(60/hour). Set `SIGNAL_COOLDOWN_MS=0` to deliver every window; the default
+5-minute cooldown throttles most windows and is only appropriate when fewer,
+more selective messages are wanted. `/health` reports `telegram.throttled`, so a
+non-zero count there is the tell that windows are being suppressed.
+
 ### What runs in the container
 
 | Process | Purpose |

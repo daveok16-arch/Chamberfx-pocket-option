@@ -441,3 +441,39 @@ counterpart to `deploy/supervisord.conf`.
   a reload landing mid-write could raise on a torn pickle. Now a temp file plus
   `os.replace`, matching the engine's own atomic-write convention. The temp file
   is chmod'd to 0644 because `mkstemp` creates 0600.
+
+## Deployment (Render) — verified 2026-10-18
+
+Service `Chamberfx-pocket-option` (`srv-dbacaftg1s2s73bivrt0`), owner
+`tea-db9333c9v7es73ecareg`. Deploys Docker from repo root, `main` branch.
+
+- **`main` is the deploy branch and `autoDeploy` did not fire for a plain push.**
+  The live deploys were both API-triggered (`POST /v1/services/<id>/deploys`).
+  After pushing to `main`, check the deploy list rather than assuming; if no new
+  deploy appears, trigger one explicitly.
+- **`git push origin main` pushes the local `main` ref, not HEAD.** When the
+  work is on a feature branch, use `git push origin HEAD:main` or the push is
+  rejected as non-fast-forward.
+- **The service runs on the `free` plan with no disk**, though `render.yaml`
+  declares `standard` + a 1GB disk. Read the service back
+  (`GET /v1/services/<id>`) rather than trusting the blueprint. Free plan means:
+  spin-down when idle (capture stops, breaking "continuously"), no persistence
+  (`signals.json` / `model.pkl` wiped per deploy), and 512MB (Chromium OOM risk).
+  Moving to a paid plan is a billing decision and was deliberately left to the
+  operator.
+- **`healthCheckPath` was empty** and is now `/health`, so Render actually
+  health-checks the service.
+- **Env vars were entirely unset** on the service (the blueprint's values had
+  never been applied). Set via `PUT /v1/services/<id>/env-vars`: `PORT`,
+  `PERIOD`, `HORIZON`, `DATA_DIR`, `SIGNALS_FILE`, `FEATURES_FILE`, `MODEL_FILE`,
+  `RETRAIN_INTERVAL_SEC`, `SIGNAL_COOLDOWN_MS`, `TELEGRAM_BOT_TOKEN`,
+  `TELEGRAM_CHAT_ID`. Secrets are stored server-side and never echoed back.
+- **Live verification (2026-10-18):** `connected: true`, 6 assets,
+  `predictionStats.total` climbing, `telegram.sent` climbing at one message per
+  minute with `failed: 0` and `throttled: 0`. A labeled test message reached the
+  target chat. ML is still `[BASE]` only — no model has been trained on the
+  deployed instance yet, so `/predict` answers 503 and the local baseline answers.
+- **`SIGNAL_COOLDOWN_MS=0` on the deployed service.** At the 300000 default the
+  live run showed `sent 4 / throttled 43`; at `0` it is one message per 60s
+  window with zero throttling. Batching already caps delivery at 60 msgs/hour, so
+  the cooldown's original flood rationale no longer holds.
