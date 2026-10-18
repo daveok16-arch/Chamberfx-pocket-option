@@ -38,6 +38,11 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements.txt
       - run: python -m py_compile app.py train.py features.py model_bundle.py
+      # The unit tests pin the horizon purge, the schema-drift guard, the block
+      # null, and the serving feature contract. They must run in CI, not just
+      # locally, or a regression in any of them ships unnoticed.
+      - name: Unit tests
+        run: python -m unittest discover -p "test_*.py" -v
       # Synthetic dataset: proves the validation paths run end-to-end without
       # needing a real capture session.
       - name: Train smoke test
@@ -60,7 +65,7 @@ jobs:
                       "features":{"open":px,"close":px,"high":px*1.0001,"low":px*0.9999,
                                   "range":px*0.0002,"tickCount":100,"netChangePct":0.0,
                                   "avgAbsDelta":px*1e-5,"stdDev":px*2e-5,"upRatio":0.5,
-                                  "windowSpanSec":59.0,"momentum60s":0.0},
+                                  "windowSpanSec":59.0,"recentMomentumPct":0.0},
                       "source":"feature-label-collector"})
           json.dump(rows, open("signals.json","w"))
           PY
