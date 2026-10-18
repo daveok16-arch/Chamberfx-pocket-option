@@ -66,8 +66,35 @@ function parsePeriod(): number {
   return period;
 }
 
+/**
+ * Parse CLI args and env for the label horizon.
+ *
+ * The horizon is how far ahead the label is measured ("will price be higher in
+ * N seconds?"). It is separate from the candle period: the feature window stays
+ * 60s, but a longer horizon is a different prediction problem — a 60s horizon
+ * is dominated by microstructure noise, a 180s/300s horizon gives a real move
+ * room to develop. Kept to the same set the broker offers expirations for.
+ *
+ * @returns Horizon in seconds (60 | 180 | 300)
+ */
+function parseHorizon(): number {
+  const args = process.argv.slice(2);
+  const fromEnv = Number(process.env.HORIZON);
+  let horizon = [60, 180, 300].includes(fromEnv) ? fromEnv : 60;
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--horizon' || args[i] === '-H') {
+      const v = Number(args[i + 1]);
+      if ([60, 180, 300].includes(v)) horizon = v;
+      i++;
+    }
+  }
+  return horizon;
+}
+
 async function main() {
   const candlePeriod = parsePeriod();
+  const horizonSec = parseHorizon();
 
   const bot = new PocketOptionPriceBot({
     verbose: false,
@@ -79,6 +106,7 @@ async function main() {
   console.log('  Pocket Option OTC — Live Price Capture');
   console.log('===========================================');
   console.log(`  Candle period:   ${candlePeriod}s`);
+  console.log(`  Label horizon:   ${horizonSec}s`);
   console.log(`  Assets:          ${DEFAULT_ASSETS.join(', ')}`);
   console.log('===========================================\n');
 
@@ -99,7 +127,14 @@ async function main() {
   // rebuilds wipe the dataset on every push.
   const featuresFile = process.env.FEATURES_FILE ?? './live-prices.json';
   const signalsFile = process.env.SIGNALS_FILE ?? './signals.json';
-  const collector = new FeatureLabelCollector({ featuresFile, signalsFile });
+  // The horizon must reach the collector, not just the candle engine. Before
+  // this it was silently fixed at 60s, so `--period 180` changed the candles
+  // but every label was still resolved 60s later.
+  const collector = new FeatureLabelCollector({
+    featuresFile,
+    signalsFile,
+    horizonMs: horizonSec * 1000,
+  });
 
   // --- Prediction: score EVERY window at the 60s bucket boundary -------
   // A prediction bot must always predict. The ML service is preferred when
@@ -226,6 +261,7 @@ async function main() {
         assets: prices.size,
         prices: Object.fromEntries(prices),
         candlePeriod: `${candlePeriod}s`,
+        labelHorizon: `${horizonSec}s`,
         predictor: predictor.name,
         inference: inference.getStats(),
         predictionStats,

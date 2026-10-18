@@ -88,6 +88,7 @@ class Dataset:
     assets: list[str]
     entry_at: np.ndarray
     range_pct: np.ndarray
+    horizon_ms: int = HORIZON_MS
 
     def __len__(self) -> int:
         return len(self.y)
@@ -112,6 +113,7 @@ def load_dataset(path: Path) -> Dataset:
         raise ValueError(f"Expected a JSON array in {path}, got {type(raw).__name__}")
 
     rows: list[tuple[int, list[float], int, str, float]] = []
+    horizons: list[int] = []
     skipped = 0
 
     for rec in raw:
@@ -132,6 +134,15 @@ def load_dataset(path: Path) -> Dataset:
         if not isinstance(entry_at, (int, float)):
             skipped += 1
             continue
+
+        # Measure the label horizon from the record itself. The purge in
+        # chronological_split needs the true horizon: if the collector was run
+        # with a 180s horizon and the purge still assumes 60s, training rows
+        # whose outcomes land in the test period survive and leak. Reading it
+        # from the data means the two can never drift apart.
+        resolved_at = rec.get("resolvedAt")
+        if isinstance(resolved_at, (int, float)) and resolved_at > entry_at:
+            horizons.append(int(resolved_at - entry_at))
 
         open_px = features.get("open")
         rng = features.get("range")
@@ -159,7 +170,16 @@ def load_dataset(path: Path) -> Dataset:
     entry_at = np.asarray([r[0] for r in rows], dtype=np.int64)
     range_pct = np.asarray([r[4] for r in rows], dtype=float)
 
-    return Dataset(X, y, assets, entry_at, range_pct)
+    # Median is robust to a few malformed/rounding outliers in the horizon.
+    horizon_ms = int(np.median(horizons)) if horizons else HORIZON_MS
+    if horizons and len(set(horizons)) > 1:
+        print(
+            f"[data] mixed label horizons {sorted(set(horizons))}ms — "
+            f"using median {horizon_ms}ms for the purge"
+        )
+    print(f"[data] label horizon: {horizon_ms}ms (measured from resolvedAt-entryAt)")
+
+    return Dataset(X, y, assets, entry_at, range_pct, horizon_ms)
 
 
 def build_model(seed: int) -> RandomForestClassifier:
@@ -179,9 +199,13 @@ def chronological_split(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Split indices into (train, test) by time, purging overlapping horizons.
 
-    Train is the older block, test the newer. Any training row whose 60s label
+    Train is the older block, test the newer. Any training row whose label
     horizon reaches into the test period is dropped, plus `embargo_ms` of extra
     gap — otherwise a row can be labelled using test-period prices.
+
+    The horizon comes from `ds.horizon_ms` (measured from the data), not a
+    constant: a dataset collected at a 180s horizon must be purged over 180s,
+    or rows up to 180s before the seam keep labels built from test prices.
     """
     n = len(ds)
     split = int(n * (1.0 - test_size))
@@ -192,7 +216,7 @@ def chronological_split(
 
     train_candidates = np.arange(0, split)
     # Purge: drop rows whose outcome window overlaps test, and embargo the seam.
-    keep = ds.entry_at[train_candidates] + HORIZON_MS + embargo_ms <= test_start
+    keep = ds.entry_at[train_candidates] + ds.horizon_ms + embargo_ms <= test_start
     train_idx = train_candidates[keep]
 
     if len(train_idx) == 0:
@@ -564,8 +588,9 @@ def _walk_forward(
 
     for i, (tr, te) in enumerate(splitter.split(ds.X), start=1):
         # Purge train rows whose label horizon reaches into this fold's test.
+        # Uses the measured horizon so a 180s dataset is purged over 180s.
         test_start = ds.entry_at[te[0]]
-        keep = ds.entry_at[tr] + HORIZON_MS + embargo_ms <= test_start
+        keep = ds.entry_at[tr] + ds.horizon_ms + embargo_ms <= test_start
         tr_p = tr[keep]
         if len(tr_p) < 20 or len(set(ds.y[tr_p].tolist())) < 2:
             print(f"  fold {i}: skipped (insufficient purged training rows)")
