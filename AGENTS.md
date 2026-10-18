@@ -359,3 +359,26 @@ enable delivery), `SIGNAL_COOLDOWN_MS` (300000).
   `HORIZON=60` against a file of 180s labels appends mixed-horizon rows, and
   `train.py` refuses the file (by design). Keep `HORIZON` aligned with the
   existing `signals.json`.
+- **Calibration is now gated on whether it actually helps — the Platt map alone
+  reintroduced silence.** Switching isotonic → Platt removed the 0/1 saturation
+  but not the underlying failure mode: Platt is a monotone *squashing* map, and
+  on a weak model with ~64 calibration rows it compressed the entire raw range
+  `[0,1]` into `[0.404, 0.538]` — fully inside the no-trade zone `[0.36, 0.64]`.
+  The engine could then never emit a signal, no matter how strong the input,
+  while every prediction still looked plausible (`P≈0.45`). The forest's raw
+  scores spanned `[0.284, 0.790]` and *did* clear the gate, so the calibrator was
+  strictly harmful. Measured out-of-fold, it also did not improve Brier
+  (0.2598 vs 0.2411 raw). `_calibrator_improves_brier` now decides with an
+  honest two-fold check inside the calibration slice and `_fit_calibrated`
+  returns `(model, calibrator_or_None, note)`; a map that fails to beat raw
+  Brier is dropped and the model serves raw probabilities. This is deliberately
+  conservative: a map that does not help is worse than none, because the
+  downstream filter reads magnitude. `TestCalibratorIsRejectedWhenItHurts` pins
+  both directions, including a regression that the *served* probability range
+  can reach the confidence gate at all — the silence bug is invisible to every
+  metric that only measures ranking.
+- **Lesson:** AUC is blind to this whole class of bug. Both the isotonic
+  saturation and the Platt compression left AUC untouched while making the
+  engine emit false certainty and then nothing. Any change to the probability
+  scale must be checked against the gate that consumes it, not just against
+  ranking metrics.

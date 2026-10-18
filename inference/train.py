@@ -43,6 +43,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import joblib
 import numpy as np
@@ -363,14 +364,57 @@ def economic_harness(
         )
 
 
+def _calibrator_improves_brier(
+    raw_cal: np.ndarray, y_cal: np.ndarray
+) -> tuple[bool, float, float]:
+    """Does a Platt map actually help on this slice? Honest, out-of-fold check.
+
+    Returns `(improves, raw_brier, calibrated_brier)`. The slice is split
+    chronologically in two; each half fits the map and scores the other, so no
+    row is ever scored by a map that saw it. A half without both classes is
+    skipped, which leaves the calibrated prediction equal to the raw one there —
+    so a degenerate slice simply fails to demonstrate an improvement and the
+    calibrator is dropped. That is the conservative direction, and the right
+    one: applying a map that does not help is strictly worse than not applying
+    one, because the confidence filter downstream reads the *magnitude*.
+
+    Why this guard exists: Platt is a monotone squashing map. On a weak model
+    with few calibration points it can compress the whole raw range into the
+    no-trade zone — every window then reads ~0.5 and the engine goes
+    permanently silent. It was measured doing exactly that. Calibration is only
+    worth keeping when it demonstrably improves the held-out Brier score.
+    """
+    n = len(y_cal)
+    if n < 8:
+        return False, float("nan"), float("nan")
+
+    mid = n // 2
+    halves = [(np.arange(0, mid), np.arange(mid, n)),
+              (np.arange(mid, n), np.arange(0, mid))]
+    cal_pred = raw_cal.astype(float).copy()
+    for fit_i, eval_i in halves:
+        if len(set(y_cal[fit_i].tolist())) < 2 or len(set(y_cal[eval_i].tolist())) < 2:
+            continue
+        try:
+            map_ = PlattCalibrator.fit(raw_cal[fit_i], y_cal[fit_i])
+            cal_pred[eval_i] = np.clip(map_.predict(raw_cal[eval_i]), 0.0, 1.0)
+        except ValueError:
+            continue
+
+    raw_brier = float(brier_score_loss(y_cal, raw_cal))
+    cal_brier = float(brier_score_loss(y_cal, cal_pred))
+    return cal_brier < raw_brier, raw_brier, cal_brier
+
+
 def _fit_calibrated(
     X_tr: np.ndarray, y_tr: np.ndarray, X_cal: np.ndarray, y_cal: np.ndarray, seed: int
-):
+) -> tuple[RandomForestClassifier, Any, str]:
     """Fit the forest, then a Platt (sigmoid) map on a purged calibration slice.
 
-    Returns (model, calibrator_or_None). The calibrator is None when the slice
-    is too small or single-class to fit — in that case raw probabilities are
-    used and the caller says so.
+    Returns `(model, calibrator_or_None, note)`. The calibrator is None when the
+    slice is too small, single-class, or when the map fails to improve the
+    out-of-fold Brier score — in every one of those cases raw probabilities are
+    used and `note` says why.
 
     Platt, not isotonic: isotonic is non-parametric and, on the ~30-row slices
     available here, steps to exactly 0.0/1.0. The confidence filter downstream
@@ -380,14 +424,28 @@ def _fit_calibrated(
     model = build_model(seed)
     model.fit(X_tr, y_tr)
 
-    calibrator = None
-    if len(y_cal) >= 30 and len(set(y_cal.tolist())) == 2:
-        raw = model.predict_proba(X_cal)[:, 1]
-        try:
-            calibrator = PlattCalibrator.fit(raw, y_cal)
-        except ValueError:
-            calibrator = None
-    return model, calibrator
+    if len(y_cal) < 30 or len(set(y_cal.tolist())) != 2:
+        return model, None, (
+            f"calibration slice too small/single-class (n={len(y_cal)}) "
+            "- using raw probabilities"
+        )
+
+    raw = model.predict_proba(X_cal)[:, 1]
+    improves, raw_brier, cal_brier = _calibrator_improves_brier(raw, y_cal)
+    if not improves:
+        return model, None, (
+            f"Platt rejected: out-of-fold Brier {cal_brier:.4f} does not beat raw "
+            f"{raw_brier:.4f} on {len(y_cal)} row(s) - using raw probabilities"
+        )
+
+    try:
+        calibrator = PlattCalibrator.fit(raw, y_cal)
+    except ValueError:
+        return model, None, "Platt fit failed - using raw probabilities"
+    return model, calibrator, (
+        f"Platt (sigmoid) fitted on {len(y_cal)} purged row(s); out-of-fold Brier "
+        f"{cal_brier:.4f} beats raw {raw_brier:.4f}"
+    )
 
 
 def _apply(model, calibrator, X: np.ndarray) -> np.ndarray:
@@ -555,13 +613,10 @@ def train(
         cut = max(1, min(cut, len(train_idx) - 1))
         fit_idx, cal_idx = train_idx[:cut], train_idx[cut:]
 
-        model, calibrator = _fit_calibrated(
+        model, calibrator, calib_note = _fit_calibrated(
             ds.X[fit_idx], ds.y[fit_idx], ds.X[cal_idx], ds.y[cal_idx], seed
         )
-        if calibrator is None:
-            print("[calib] calibration slice too small/single-class - using raw probabilities")
-        else:
-            print(f"[calib] Platt (sigmoid) fitted on {len(cal_idx)} purged row(s)")
+        print(f"[calib] {calib_note}")
 
         X_te, y_te = ds.X[test_idx], ds.y[test_idx]
         raw = model.predict_proba(X_te)[:, 1]
@@ -621,9 +676,14 @@ def train(
             deploy_model = build_model(seed)
             deploy_model.fit(ds.X[train_idx], ds.y[train_idx])
             deploy_calib = calibrator
+            calib_state = (
+                "calibrator reused from the purged slice"
+                if calibrator is not None
+                else "no calibrator (rejected above)"
+            )
             print(
                 f"[save] --refit-full: forest refit on {len(train_idx)} rows "
-                f"(was {len(fit_idx)}); calibrator reused from the purged slice"
+                f"(was {len(fit_idx)}); {calib_state}"
             )
         else:
             deploy_model, deploy_calib = model, calibrator

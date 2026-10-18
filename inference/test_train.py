@@ -24,6 +24,8 @@ from features import FEATURE_NAMES
 from model_bundle import PlattCalibrator
 from train import (
     Dataset,
+    _calibrator_improves_brier,
+    _fit_calibrated,
     _report_block_null,
     chronological_split,
     load_dataset,
@@ -375,6 +377,87 @@ class TestCalibratorDoesNotSaturate(unittest.TestCase):
             joblib.dump(cal, p)
             back = joblib.load(p)
         np.testing.assert_allclose(cal.predict(raw), back.predict(raw))
+
+
+class TestCalibratorIsRejectedWhenItHurts(unittest.TestCase):
+    """A calibration map is only kept when it demonstrably helps.
+
+    The failure this pins: a Platt map fitted on a weak model compressed the
+    entire raw range into the no-trade zone, so the deployed engine could never
+    emit a signal — it went permanently silent while every prediction looked
+    plausible. The map's own out-of-fold Brier score is the evidence, so a map
+    that does not beat raw probabilities must not be saved.
+    """
+
+    def _slice(self, n: int, *, overconfident: bool) -> tuple[np.ndarray, np.ndarray]:
+        """Scores whose relationship to the label is known.
+
+        `overconfident=False` produces raw scores that are already calibrated
+        (the label is drawn from the score itself), so no monotone remap can
+        help. `overconfident=True` deliberately exaggerates the score's
+        confidence, which is exactly what Platt exists to correct.
+        """
+        rng = np.random.default_rng(3)
+        z = rng.normal(0, 1.2, size=n)
+        p_true = 1.0 / (1.0 + np.exp(-z))
+        y = (rng.uniform(size=n) < p_true).astype(int)
+        k = 5.0 if overconfident else 1.0
+        raw = 1.0 / (1.0 + np.exp(-k * z))
+        return raw, y
+
+    def test_guard_accepts_a_map_that_helps(self):
+        raw, y = self._slice(400, overconfident=True)
+        improves, raw_b, cal_b = _calibrator_improves_brier(raw, y)
+        self.assertTrue(improves, f"raw={raw_b:.4f} calibrated={cal_b:.4f}")
+
+    def test_guard_rejects_a_map_that_does_not_help(self):
+        """Already-calibrated scores: there is nothing to fix, so the map must
+        not be kept just because it ran without error."""
+        raw, y = self._slice(400, overconfident=False)
+        improves, _, _ = _calibrator_improves_brier(raw, y)
+        self.assertFalse(improves)
+
+    def test_fit_calibrated_returns_none_when_the_map_hurts(self):
+        """End-to-end: a useless slice yields calibrator=None and a note, so the
+        saved model serves raw probabilities instead of a squashed map."""
+        rng = np.random.default_rng(11)
+        n = 120
+        X = rng.normal(size=(n, len(FEATURE_NAMES)))
+        y = rng.integers(0, 2, size=n)  # labels independent of X
+        X_cal, y_cal = X[:64], y[:64]
+        if len(set(y_cal.tolist())) < 2:
+            y_cal[0], y_cal[1] = 0, 1
+        _, calibrator, note = _fit_calibrated(X[64:], y[64:], X_cal, y_cal, 0)
+        self.assertIsNone(calibrator, note)
+        self.assertIn("rejected", note)
+
+    def test_deployed_output_can_reach_the_confidence_gate(self):
+        """The engine must be able to emit *something*.
+
+        Regression for the silence bug: if the served probability range lies
+        entirely inside the no-trade zone [0.36, 0.64], every window is
+        discarded forever no matter how strong the signal.
+        """
+        NT_LOW, NT_HIGH, GATE = 0.36, 0.64, 0.65
+        rng = np.random.default_rng(5)
+        n = 200
+        X = rng.normal(size=(n, len(FEATURE_NAMES)))
+        # A learnable relationship, so the forest produces a spread of scores.
+        y = (X[:, 0] + X[:, 1] > 0).astype(int)
+        model, calibrator, _ = _fit_calibrated(
+            X[:120], y[:120], X[120:180], y[120:180], 0
+        )
+
+        grid = np.linspace(0, 1, 10001)
+        out = np.clip(calibrator.predict(grid), 0, 1) if calibrator is not None else grid
+
+        def passes(p: float) -> bool:
+            return max(p, 1 - p) >= GATE and not (NT_LOW <= p <= NT_HIGH)
+
+        self.assertTrue(
+            any(passes(float(v)) for v in out),
+            "served probabilities can never clear the confidence gate",
+        )
 
 
 if __name__ == "__main__":
