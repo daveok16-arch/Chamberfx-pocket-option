@@ -41,6 +41,7 @@ import json
 import math
 import os
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -397,9 +398,16 @@ def _calibrator_improves_brier(
             continue
         try:
             map_ = PlattCalibrator.fit(raw_cal[fit_i], y_cal[fit_i])
-            cal_pred[eval_i] = np.clip(map_.predict(raw_cal[eval_i]), 0.0, 1.0)
         except ValueError:
             continue
+        # A calibration map must be monotone INCREASING. A negative slope means
+        # this half was (by chance) anti-correlated with the raw score, so the
+        # map would invert the model's direction on live data. Leave those rows
+        # raw: an inverting map is not calibration, so it must never be able to
+        # earn an "improvement" here.
+        if map_.coef <= 0.0:
+            continue
+        cal_pred[eval_i] = np.clip(map_.predict(raw_cal[eval_i]), 0.0, 1.0)
 
     raw_brier = float(brier_score_loss(y_cal, raw_cal))
     cal_brier = float(brier_score_loss(y_cal, cal_pred))
@@ -442,6 +450,18 @@ def _fit_calibrated(
         calibrator = PlattCalibrator.fit(raw, y_cal)
     except ValueError:
         return model, None, "Platt fit failed - using raw probabilities"
+
+    # Belt and braces: the out-of-fold check above already refuses to reward a
+    # decreasing map, but the map finally persisted is fit on the full slice,
+    # where the slope could differ in sign. A non-positive slope is never a
+    # calibration — it inverts the model's direction, and the direction filter
+    # downstream reads `P >= 0.5` — so refuse it outright.
+    if calibrator.coef <= 0.0:
+        return model, None, (
+            f"Platt rejected: slope {calibrator.coef:.4f} is not positive "
+            "(would invert the model's direction) - using raw probabilities"
+        )
+
     return model, calibrator, (
         f"Platt (sigmoid) fitted on {len(y_cal)} purged row(s); out-of-fold Brier "
         f"{cal_brier:.4f} beats raw {raw_brier:.4f}"
@@ -634,8 +654,10 @@ def train(
 
         # The control that makes the AUC above interpretable: fit the same
         # feature set on shuffled labels and compare. Reported for the raw
-        # forest, since the calibrator is a monotone map that leaves ranking
-        # (and therefore AUC) unchanged.
+        # forest. A calibration map that is monotone *increasing* leaves ranking
+        # (and therefore AUC) unchanged; if the two AUCs sum to ~1.0 the map is
+        # decreasing and has inverted the model, which is why `_fit_calibrated`
+        # refuses a non-positive slope.
         raw_auc = roc_auc_score(y_te, raw) if len(set(y_te.tolist())) == 2 else float("nan")
         if math.isfinite(raw_auc):
             null_aucs = _permutation_baseline(
@@ -689,9 +711,27 @@ def train(
             deploy_model, deploy_calib = model, calibrator
 
         model_path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(
-            CalibratedModel(deploy_model, deploy_calib, FEATURE_NAMES), model_path
+        # Write to a temp file and rename, so a concurrent reader (the inference
+        # service reloads on mtime change) can never observe a half-written
+        # pickle. An in-place dump is not atomic: the reload can land mid-write,
+        # and joblib.load then raises rather than returning the old model.
+        # rename(2) is atomic within a filesystem, so a reader sees either the
+        # previous file or the complete new one.
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(model_path.parent), prefix=f".{model_path.name}.", suffix=".tmp"
         )
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        try:
+            joblib.dump(
+                CalibratedModel(deploy_model, deploy_calib, FEATURE_NAMES), tmp_path
+            )
+            # mkstemp creates 0600; match what an ordinary dump would leave so
+            # the mode does not silently change if a reader runs as another user.
+            os.chmod(tmp_path, 0o644)
+            os.replace(tmp_path, model_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
         print(f"\n[save] wrote {model_path} ({model_path.stat().st_size} bytes)")
 
     return 0

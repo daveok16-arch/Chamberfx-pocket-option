@@ -10,20 +10,47 @@
 # next request via MODEL_AUTO_RELOAD, so no restart is needed.
 set -u
 
-# Resolve the interpreter and training script relative to this script so the
-# loop works both in the container (/app) and from a local checkout.
+log() { echo "[retrain] $*"; }
+
+# Resolve everything relative to this script so the loop works both in the
+# container and from a local checkout.
+#
+# The interpreter is the subtle one: the image builds its venv at /app/venv
+# (a sibling of the source), while a local checkout keeps it under
+# inference/.venv. Guessing wrong is silent — the loop just logs "not trained
+# yet" forever and the deployed model never updates — so probe both and fail
+# loudly if neither exists. PYTHON overrides the probe.
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_ROOT="${APP_ROOT:-$(dirname "$SELF_DIR")}"
-PYTHON="${PYTHON:-$APP_ROOT/inference/.venv/bin/python}"
 TRAIN="${TRAIN:-$APP_ROOT/inference/train.py}"
+
+if [ -z "${PYTHON:-}" ]; then
+  for cand in \
+    "$APP_ROOT/venv/bin/python" \
+    "$APP_ROOT/inference/.venv/bin/python" \
+    "$APP_ROOT/.venv/bin/python"
+  do
+    if [ -x "$cand" ]; then PYTHON="$cand"; break; fi
+  done
+fi
+
+if [ -z "${PYTHON:-}" ] || [ ! -x "$PYTHON" ]; then
+  log "error: no python interpreter found under ${APP_ROOT}"
+  log "       set PYTHON=/path/to/venv/bin/python, or create one:"
+  log "       python3 -m venv inference/.venv && inference/.venv/bin/pip install -r inference/requirements.txt"
+  exit 1
+fi
+
+if [ ! -f "$TRAIN" ]; then
+  log "error: train.py not found at ${TRAIN}"
+  exit 1
+fi
 
 SIGNALS="${SIGNALS_FILE:-$APP_ROOT/price-bot/signals.json}"
 MODEL="${MODEL_FILE:-$APP_ROOT/inference/model.pkl}"
 INTERVAL="${RETRAIN_INTERVAL_SEC:-1800}"
 
-log() { echo "[retrain] $*"; }
-
-log "loop started (interval ${INTERVAL}s, data ${SIGNALS}, model ${MODEL})"
+log "loop started (interval ${INTERVAL}s, data ${SIGNALS}, model ${MODEL}, python ${PYTHON})"
 
 while true; do
   sleep "$INTERVAL"

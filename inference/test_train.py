@@ -459,6 +459,57 @@ class TestCalibratorIsRejectedWhenItHurts(unittest.TestCase):
             "served probabilities can never clear the confidence gate",
         )
 
+    def test_guard_never_rewards_a_decreasing_map(self):
+        """An inverted slice must not be able to earn an "improvement".
+
+        The failure this pins: on a calibration slice where the raw score was
+        (by chance) anti-correlated with the label, the out-of-fold check fitted
+        a Platt map with a *negative* slope. That map still lowered the Brier
+        score — inverting a useless ranking does score better than the ranking
+        itself — so it was accepted and persisted. Served live it inverted the
+        model: correlation with the label went from +0.34 to -0.34, the whole
+        probability range collapsed into [0.40, 0.45], and 0 of 882 rows could
+        clear the gate. The tell was `AUC_raw + AUC_calibrated == 1.0`.
+
+        A map that decreases is not a calibration, so it must be dropped.
+        """
+        rng = np.random.default_rng(0)
+        n = 400
+        raw = rng.uniform(0.3, 0.7, size=n)
+        y = (raw < 0.5).astype(int)  # deliberately anti-correlated
+
+        improves, raw_b, cal_b = _calibrator_improves_brier(raw, y)
+        self.assertFalse(
+            improves,
+            f"a decreasing map was rewarded: raw={raw_b:.4f} calibrated={cal_b:.4f}",
+        )
+
+    def test_fit_calibrated_never_persists_a_decreasing_map(self):
+        """End-to-end: whatever the guard decides, the *saved* map must not
+        invert the model. A non-positive slope is refused at fit time."""
+        rng = np.random.default_rng(7)
+        n = 200
+        X = rng.normal(size=(n, len(FEATURE_NAMES)))
+        # Labels anti-correlated with the dominant feature, so a fitted map
+        # wants a negative slope.
+        y = (X[:, 0] < 0).astype(int)
+        model, calibrator, _ = _fit_calibrated(
+            X[:120], y[:120], X[120:180], y[120:180], 0
+        )
+        if calibrator is not None:
+            self.assertGreater(
+                calibrator.coef,
+                0.0,
+                "a persisted calibrator must be monotone increasing",
+            )
+            raw = model.predict_proba(X[120:180])[:, 1]
+            cal = np.clip(calibrator.predict(raw), 0, 1)
+            self.assertGreater(
+                float(np.corrcoef(cal, y[120:180])[0, 1]),
+                0.0,
+                "persisted calibrator inverted the model's direction",
+            )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

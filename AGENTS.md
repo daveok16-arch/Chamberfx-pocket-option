@@ -413,4 +413,28 @@ counterpart to `deploy/supervisord.conf`.
   It is the local counterpart to `deploy/supervisord.conf`. `retrain-loop.sh`
   now resolves its interpreter, `train.py`, dataset and model relative to its own
   location instead of hardcoding `/app/...`, so the same script works in the
-  container and from a checkout.
+  container and from a checkout. **The interpreter is the subtle one:** the image
+  builds its venv at `/app/venv` (sibling of the source) while a checkout keeps it
+  at `inference/.venv`, so the loop probes both and exits loudly if neither
+  exists. Guessing wrong is silent — the loop logs "not trained yet" forever and
+  the deployed model never updates.
+- **A calibrator can invert the model (2026-10-16).** The Platt guard checked
+  Brier improvement but not the *sign* of the slope. On a calibration slice whose
+  raw scores were by chance anti-correlated with the labels, the out-of-fold
+  check fitted a map with a negative slope and — correctly, in Brier terms —
+  found it improved the score. Inverting a useless ranking does score better than
+  the ranking itself. That map was persisted and served: correlation with the
+  label went from **+0.34 to −0.34**, the whole probability range collapsed to
+  `[0.3996, 0.4502]`, and **0 of 882 rows** could clear the 0.65 gate. Same
+  silence bug as the isotonic/Platt compressions, through a third door, and
+  invisible to Brier because Brier rewards the inversion. `_calibrator_improves_brier`
+  now skips halves whose fitted slope is non-positive, and `_fit_calibrated`
+  refuses a non-positive slope on the final map. **The tell is arithmetic:** a
+  monotone *increasing* map leaves ranking (and AUC) unchanged, so
+  `AUC_raw + AUC_calibrated ≈ 1.0` proves the map is decreasing. That is how this
+  was caught — the eval printed raw `roc_auc 0.4830` beside calibrated `0.5170`.
+- **`model.pkl` is written atomically (2026-10-16).** `train.py` wrote it with a
+  plain `joblib.dump` while the inference service reloads it on mtime change, so
+  a reload landing mid-write could raise on a torn pickle. Now a temp file plus
+  `os.replace`, matching the engine's own atomic-write convention. The temp file
+  is chmod'd to 0644 because `mkstemp` creates 0600.
