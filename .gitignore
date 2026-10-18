@@ -30,3 +30,6 @@ inference/model.pkl
 # OS
 .DS_Store
 Thumbs.db
+
+# Local supervisor runtime (logs, pids, lock) — see run.sh
+run/

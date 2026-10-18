@@ -426,6 +426,108 @@ section('deliverer — throttle policy and message formatting');
 }
 
 // ============================================================
+section('deliverer — batching a bucket into one message');
+// ============================================================
+{
+  // Six assets clear the filters in the same evaluate tick because the bucket
+  // boundary is wall-clock aligned and shared. Without batching that is six
+  // separate chat messages for one market moment.
+  const items = ['EURUSD_otc', 'GBPUSD_otc', 'USDJPY_otc', 'AUDUSD_otc', 'USDCAD_otc', 'XAUUSD_otc'].map(
+    (asset, i) => ({
+      signal: {
+        timestamp: 1_792_000_000_000,
+        asset,
+        direction: (i % 2 === 0 ? 'CALL' : 'PUT') as 'CALL' | 'PUT',
+        confidence: 0.66 + i * 0.01,
+      },
+      features: feat({ close: 1.1 + i * 0.01, windowSpanSec: 59 }),
+      source: 'ml',
+    })
+  );
+
+  const batch = TelegramDeliverer.formatBatch(items);
+  check('batch header counts every signal', batch.includes('6 signals'));
+  check('batch is one message, not six', batch.split('\n\n').length === 3);
+  for (const it of items) {
+    check(`batch lists ${it.signal.asset}`, batch.includes(it.signal.asset));
+  }
+  check('batch names every direction', batch.includes('CALL') && batch.includes('PUT'));
+  // Strongest signal first, so the most actionable line is at the top.
+  const lines = batch.split('\n\n')[1].split('\n');
+  check('batch is sorted by confidence desc', lines[0].includes('XAUUSD_otc'));
+  check('batch states a single shared source', batch.includes('source: ml'));
+
+  const mixed = TelegramDeliverer.formatBatch([
+    { ...items[0], source: 'ml' },
+    { ...items[1], source: 'local-baseline' },
+  ]);
+  check('mixed sources are labelled as such', mixed.includes('source: mixed'));
+
+  const single = TelegramDeliverer.formatBatch([items[0]]);
+  check('a one-signal batch reads singular', single.includes('1 signal ') && !single.includes('1 signals'));
+}
+
+// ============================================================
+section('deliverer — batch window drains to a single send');
+// ============================================================
+{
+  // Credentials are required for `send` to do anything. `fetch` is stubbed so
+  // the test never reaches Telegram; only the call count matters here.
+  process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+  process.env.TELEGRAM_CHAT_ID = 'test-chat';
+  const savedFetch = globalThis.fetch;
+  let calls = 0;
+  (globalThis as any).fetch = async () => {
+    calls++;
+    return { ok: true, status: 200 } as any;
+  };
+
+  const d = new TelegramDeliverer({ quiet: true, batchWindowMs: 50, cooldownMs: 0 });
+  const sig = (asset: string) => ({
+    timestamp: 1_792_000_000_000,
+    asset,
+    direction: 'CALL' as const,
+    confidence: 0.7,
+  });
+  // Six signals enqueued together, as the bucket callback does.
+  for (const a of ['A_otc', 'B_otc', 'C_otc', 'D_otc', 'E_otc', 'F_otc']) {
+    void d.send(sig(a), feat(), 'ml');
+  }
+  check('nothing is sent before the batch window closes', calls === 0);
+
+  await d.flush();
+  check('one bucket produces exactly one message', calls === 1);
+  check('the message covers all six signals', d.getStats().signals === 6);
+  check('message count is one, not six', d.getStats().sent === 1);
+
+  // A second bucket with the same assets inside the cooldown must be throttled.
+  const d2 = new TelegramDeliverer({ quiet: true, batchWindowMs: 50, cooldownMs: 300_000 });
+  calls = 0;
+  for (const a of ['A_otc', 'B_otc']) void d2.send(sig(a), feat(), 'ml');
+  await d2.flush();
+  check('first bucket delivers', calls === 1);
+  // 60s later, same assets: still inside the 5-minute cooldown.
+  for (const a of ['A_otc', 'B_otc']) {
+    void d2.send({ ...sig(a), timestamp: 1_792_000_060_000 }, feat(), 'ml');
+  }
+  await d2.flush();
+  check('cooldown suppresses the next bucket', calls === 1);
+  check('suppressed signals are counted as throttled', d2.getStats().throttled === 2);
+
+  // batchWindowMs = 0 restores one message per signal.
+  const d3 = new TelegramDeliverer({ quiet: true, batchWindowMs: 0, cooldownMs: 0 });
+  calls = 0;
+  await d3.send(sig('A_otc'), feat(), 'ml');
+  await d3.send(sig('B_otc'), feat(), 'ml');
+  check('batchWindowMs=0 sends per signal', calls === 2);
+  check('per-signal mode counts two messages', d3.getStats().sent === 2);
+
+  (globalThis as any).fetch = savedFetch;
+  delete process.env.TELEGRAM_BOT_TOKEN;
+  delete process.env.TELEGRAM_CHAT_ID;
+}
+
+// ============================================================
 console.log('\n' + '='.repeat(60));
 if (failures.length === 0) {
   console.log(`ALL ${passed} CHECKS PASSED`);

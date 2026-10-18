@@ -240,7 +240,9 @@ async function main() {
         ` | predictions total=${predictionStats.total}` +
         ` ml=${predictionStats.ml} base=${predictionStats.local}` +
         ` | signals accepted=${predictionStats.accepted} rejected=${predictionStats.rejected}` +
-        (d.enabled ? ` | telegram sent=${d.sent} failed=${d.failed} throttled=${d.throttled}` : '')
+        (d.enabled
+          ? ` | telegram msgs=${d.sent} signals=${d.signals} failed=${d.failed} throttled=${d.throttled}`
+          : '')
     );
   }, 15000);
 
@@ -308,6 +310,15 @@ async function main() {
           `base=${predictionStats.local} accepted=${predictionStats.accepted} ` +
           `rejected=${predictionStats.rejected}`
       );
+      // Drain any batched signals still inside the delivery window, so the
+      // final bucket of a run is delivered rather than silently dropped.
+      const d = deliverer.getStats();
+      if (d.enabled) {
+        console.log(
+          `[DELIVER] final: msgs=${d.sent} signals=${d.signals} ` +
+            `failed=${d.failed} throttled=${d.throttled}`
+        );
+      }
     } catch (e) {
       console.error(`[COLLECT] shutdown flush failed: ${(e as Error).message}`);
     }
@@ -316,7 +327,12 @@ async function main() {
     clearInterval(writeTimer);
     healthServer.close();
     bot.disconnect();
-    process.exit(0);
+    // The batch timer is unref'd, so give the pending flush a moment to reach
+    // Telegram before the process exits. Best-effort and time-bounded.
+    void Promise.race([
+      deliverer.flush(),
+      new Promise((r) => setTimeout(r, 3000)),
+    ]).finally(() => process.exit(0));
   };
 
   process.on('SIGINT', shutdown);

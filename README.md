@@ -31,7 +31,7 @@ price-bot/
   strategy.ts          Feature/label collector + ML inference client
   predictor.ts         Prediction layer: baseline predictor + ML/fallback router
   signalFilter.ts      Signal quality filters + confidence guardrails
-  deliverer.ts         Telegram signal delivery (throttled, best-effort)
+  deliverer.ts         Telegram signal delivery (batched per bucket, best-effort)
   capture.ts           Entrypoint: capture + collector + prediction + delivery
   tests/run.ts         Unit/integration test suite (npm test)
   tsconfig.json        TypeScript config
@@ -39,11 +39,12 @@ inference/
   app.py               FastAPI service: /predict /health /reload
   train.py             Trains model.pkl from signals.json (time-series validation)
   features.py          Shared feature contract (train + serve)
-  model_bundle.py      CalibratedModel artifact (forest + Platt calibrator)
+  model_bundle.py      Model artifact + optional Platt calibrator (kept only if it helps)
   requirements.txt     Python dependencies
   README.md            Inference service docs
 Dockerfile             (repo root) Render.com deployment image (both services)
 render.yaml            (repo root) Render blueprint (disk + env)
+run.sh                 (repo root) local always-on supervisor (inference + capture + retrain)
 deploy/
   supervisord.conf     Runs capture + inference + retrain in one container
   entrypoint.sh        Prepares the data dir, then execs supervisord
@@ -94,6 +95,36 @@ the model.
 Training reads the horizon back out of the data (median of
 `resolvedAt - entryAt`), so the purge always matches what the collector
 actually produced. You do not need to tell `train.py` the horizon.
+
+---
+
+## Run it as a service (local)
+
+Running the pipeline by hand means three processes that must all stay up: the
+inference service, the capture engine, and the retrain loop. `run.sh` supervises
+all three, restarts any that die, and holds a lock so a second invocation cannot
+start a duplicate engine (two engines sharing one `signals.json` would
+double-append every observation).
+
+```bash
+cd inference && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cd ../price-bot && npm install
+
+cd ..
+TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... ./run.sh start
+./run.sh status     # are inference and capture up?
+./run.sh logs       # tail both logs
+./run.sh stop       # graceful: the engine flushes labels on SIGTERM
+./run.sh restart
+```
+
+Logs, pid files and the lock live under `run/` (gitignored). The supervisor
+restarts a crashed child with a capped backoff (2s doubling to 30s), and the
+engine reconnects to Pocket Option on its own. Set `RETRAIN_INTERVAL_SEC=0` to
+disable the retrain loop.
+
+This is the local counterpart to the container's `deploy/supervisord.conf`:
+same three programs, same wiring, no Docker and no root.
 
 ---
 
@@ -188,6 +219,14 @@ TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... npx tsx capture.ts
 ```
 
 - Only signals that pass the Phase 3 filters are delivered.
+- **One message per 60s bucket, not one per asset.** Every asset is scored
+  against the same wall-clock-aligned bucket, so all six cross the boundary in
+  the same evaluate tick. Signals are held for `SIGNAL_BATCH_WINDOW_MS`
+  (default 2000 = 2s) and flushed as a single message listing every asset that
+  qualified, strongest first. Set it to `0` to send one message per signal.
+  The cooldown is applied at flush time, so a batch contains only assets that
+  were actually due. `/health` reports `telegram.sent` (messages) separately
+  from `telegram.signals` (signals carried inside them).
 - Per-asset cooldown (`SIGNAL_COOLDOWN_MS`, default 300000 = 5 min) keeps a
   6-asset, every-minute cadence from flooding the chat with the same state.
 - Delivery is best-effort: failures are counted (`telegram.failed` on
@@ -301,6 +340,7 @@ so predictions are `[ML]` once a model is trained and `[BASE]` (baseline) until 
 | `TELEGRAM_BOT_TOKEN` | no | enables delivery when set with `TELEGRAM_CHAT_ID` |
 | `TELEGRAM_CHAT_ID` | no | delivery target |
 | `SIGNAL_COOLDOWN_MS` | no (default 300000) | per-asset delivery cooldown |
+| `SIGNAL_BATCH_WINDOW_MS` | no (default 2000) | gather a bucket's signals into one message; `0` sends one per signal |
 
 ---
 

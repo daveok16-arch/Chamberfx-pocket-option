@@ -24,6 +24,11 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npx tsc --noEmit
       - run: npm test
+      # The supervisor and retrain loop are bash; a syntax error would only
+      # surface at runtime, on the machine that is supposed to stay up.
+      - name: Shell syntax
+        working-directory: .
+        run: bash -n run.sh deploy/retrain-loop.sh deploy/entrypoint.sh
 
   python:
     name: Inference compile + train smoke

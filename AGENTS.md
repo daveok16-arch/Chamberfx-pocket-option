@@ -50,9 +50,15 @@ with its own safety design.
   baseline one. The baseline is a placeholder, NOT a claimed edge.
 - `price-bot/deliverer.ts` -- `TelegramDeliverer`. Ships accepted signals to a
   Telegram chat when `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` are set; inert
-  otherwise. Per-asset cooldown (`SIGNAL_COOLDOWN_MS`, default 5 min) prevents
-  the ~360 msg/hour a 6-asset every-minute cadence would otherwise produce.
-  Sends are serialised; failures are counted, never fatal.
+  otherwise. Signals are gathered over `SIGNAL_BATCH_WINDOW_MS` (default 2s) and
+  sent as ONE message per bucket (`formatBatch`), because every asset is scored
+  against the same wall-clock-aligned bucket and would otherwise burst into six
+  separate messages for a single market moment. Per-asset cooldown
+  (`SIGNAL_COOLDOWN_MS`, default 5 min) is applied at flush time and prevents the
+  ~360 msg/hour a 6-asset every-minute cadence would otherwise produce.
+  `telegram.sent` counts messages; `telegram.signals` counts signals inside them.
+  Sends are serialised; failures are counted, never fatal. Shutdown drains the
+  pending batch before exit.
 - `price-bot/capture.ts` -- entrypoint: capture + collector loop + prediction at
   bucket boundaries + Phase 3 filtering + delivery + `/health`. Writes
   `live-prices.json` (features) and `signals.json` (labels) every 15s and
@@ -155,7 +161,13 @@ Inference env vars: `INFERENCE_URL` (unset = baseline predictor only),
 `INFERENCE_TIMEOUT_MS` (5000), `MODEL_FILE` (./model.pkl),
 `MODEL_AUTO_RELOAD` (1), `PREDICTION_THRESHOLD` (0.5).
 Delivery env vars: `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (both required to
-enable delivery), `SIGNAL_COOLDOWN_MS` (300000).
+enable delivery), `SIGNAL_COOLDOWN_MS` (300000), `SIGNAL_BATCH_WINDOW_MS`
+(2000; 0 = one message per signal).
+
+Local supervisor: `run.sh start|stop|status|logs|restart` runs the inference
+service, the capture engine and the retrain loop together with a PID lock and
+restart-on-crash. Logs/pids live in `run/` (gitignored). This is the local
+counterpart to `deploy/supervisord.conf`.
 
 ## Data interfaces (from server.ts)
 - `Tick {assetId,price,timestamp,direction}`
@@ -382,3 +394,23 @@ enable delivery), `SIGNAL_COOLDOWN_MS` (300000).
   engine emit false certainty and then nothing. Any change to the probability
   scale must be checked against the gate that consumes it, not just against
   ranking metrics.
+- **Signal delivery batches per bucket (2026-10-16).** The bucket boundary is
+  `floor(serverTime / windowMs)` — wall-clock aligned — and every asset is
+  evaluated in the same `collectAll()` tick against the same `serverTime`. So all
+  six cross the boundary within ~1ms of each other and, when several cleared the
+  filter, `capture.ts` called `deliverer.send()` once per asset. The chat
+  received a burst of separate messages for a single market moment. Fixed by
+  buffering accepted signals for `SIGNAL_BATCH_WINDOW_MS` (default 2s) and
+  flushing them as one `formatBatch` message, strongest confidence first, with a
+  per-signal line and a single shared `source:`. The per-asset cooldown is now
+  applied at flush time so a batch reports only assets that were due; `sent`
+  counts messages and the new `signals` counter counts what they carried.
+  `SIGNAL_BATCH_WINDOW_MS=0` restores per-signal sends. Shutdown drains the
+  buffer (time-bounded) so the final bucket is not dropped.
+- **Local always-on supervisor (2026-10-16).** `run.sh` runs inference + capture
+  + retrain with a PID lock (two engines sharing one `signals.json` would
+  double-append every observation) and restart-on-crash with a capped backoff.
+  It is the local counterpart to `deploy/supervisord.conf`. `retrain-loop.sh`
+  now resolves its interpreter, `train.py`, dataset and model relative to its own
+  location instead of hardcoding `/app/...`, so the same script works in the
+  container and from a checkout.
