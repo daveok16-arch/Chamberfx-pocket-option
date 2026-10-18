@@ -43,15 +43,23 @@ A shuffled train/test split therefore leaks — adjacent windows land on both
 sides of the split — and reports an optimistic score. Training instead:
 
 1. sorts by `entryAt` and splits **chronologically** (train = older, test = newer);
-2. **purges** training rows whose 60s label horizon overlaps the test period,
-   plus an `--embargo-ms` gap;
+2. **purges** training rows whose label horizon overlaps the test period,
+   plus an `--embargo-ms` gap. The horizon is read from the data (median of
+   `resolvedAt - entryAt`), not assumed to be 60s — a 180s dataset is purged
+   over 180s, so the seam cannot leak;
 3. optionally runs **expanding-window walk-forward** (`--walk-forward --folds N`)
    and reports the AUC spread across folds;
 4. fits an **isotonic calibration** map on a purged slice, because a forest's
    `predict_proba` is only "calibrated-ish" and the confidence gate acts on the
    probability's magnitude;
 5. prints an **economic harness** — win rate and Wilson 95% CI for the
-   post-filter subset, against the payout break-even (`1 / (1 + payout)`).
+   post-filter subset, against the payout break-even (`1 / (1 + payout)`);
+6. runs a **shuffled-label control**: the same pipeline on permuted labels. It
+   reports the real AUC against the null distribution's spread and an empirical
+   p-value. On `--walk-forward` the control is computed on the *pooled*
+   out-of-sample predictions from every fold, which is far better powered than a
+   20% holdout — at n=240 the holdout says p=0.367 while the pooled control says
+   p=0.015 on the same data.
 
 Accuracy is not the objective. At a 0.92 payout the break-even win rate is
 **0.5208**; the only meaningful number is the win rate of the signals that
@@ -60,6 +68,7 @@ survive the filters, with an interval that says how much to trust it.
 ```bash
 python train.py --walk-forward --folds 5          # walk-forward + economic harness
 python train.py --payout 0.92 --min-confidence 0.65
+python train.py --walk-forward --permutations 200 # finer p-value (slow)
 ```
 
 The artifact written to `model.pkl` is a `CalibratedModel` (forest + optional

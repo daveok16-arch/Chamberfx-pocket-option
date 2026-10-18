@@ -58,7 +58,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import TimeSeriesSplit
 
-from features import FEATURE_NAMES, build_vector
+from features import FEATURE_NAMES, RAW_FEATURE_KEYS, build_vector
 from model_bundle import CalibratedModel
 
 # A model trained on a handful of rows is worse than no model: it produces
@@ -166,7 +166,7 @@ def load_dataset(path: Path) -> Dataset:
     # rows predates a feature rename, those rows get 0.0 for a column that
     # means something real for every other row. The model then trains on one
     # column with two meanings. Warn loudly rather than let that pass.
-    numeric_keys = [k for k in FEATURE_NAMES if not k.startswith("asset_")]
+    numeric_keys = RAW_FEATURE_KEYS
     missing_counts = {k: 0 for k in numeric_keys}
     for rec in raw:
         if not isinstance(rec, dict):
@@ -483,6 +483,7 @@ def train(
     no_trade_low: float,
     no_trade_high: float,
     max_volatility: float,
+    n_perm: int = 10,
 ) -> int:
     print(f"[data] loading {data_path}")
     ds = load_dataset(data_path)
@@ -520,7 +521,7 @@ def train(
     if walk_forward:
         _walk_forward(
             ds, test_size, seed, folds, embargo_ms, payout,
-            min_confidence, no_trade_low, no_trade_high, max_volatility,
+            min_confidence, no_trade_low, no_trade_high, max_volatility, n_perm,
         )
     else:
         train_idx, test_idx = chronological_split(ds, test_size, embargo_ms)
@@ -566,7 +567,7 @@ def train(
         raw_auc = roc_auc_score(y_te, raw) if len(set(y_te.tolist())) == 2 else float("nan")
         if math.isfinite(raw_auc):
             null_aucs = _permutation_baseline(
-                ds.X[fit_idx], ds.y[fit_idx], X_te, y_te, seed
+                ds.X[fit_idx], ds.y[fit_idx], X_te, y_te, seed, n_perm=n_perm
             )
             _report_permutation(y_te, raw_auc, null_aucs)
 
@@ -597,7 +598,7 @@ def train(
 def _walk_forward(
     ds: Dataset, test_size: float, seed: int, folds: int, embargo_ms: int,
     payout: float, min_confidence: float, no_trade_low: float,
-    no_trade_high: float, max_volatility: float,
+    no_trade_high: float, max_volatility: float, n_perm: int = 10,
 ) -> None:
     """Expanding-window walk-forward evaluation.
 
@@ -657,10 +658,69 @@ def _walk_forward(
 
     # Pooled out-of-sample predictions across all folds — the most honest
     # single estimate this dataset can give.
+    pooled_y = np.asarray(all_y)
+    pooled_p = np.asarray(all_p)
     economic_harness(
-        np.asarray(all_y), np.asarray(all_p), np.asarray(all_r), payout,
+        pooled_y, pooled_p, np.asarray(all_r), payout,
         min_confidence, no_trade_low, no_trade_high, max_volatility,
     )
+
+    # Pooled null control. The per-fold AUCs above are noisy at this sample
+    # size; pooling every fold's out-of-sample prediction into one AUC, and
+    # comparing it against the same pipeline run on shuffled labels, is the
+    # strongest read available. It answers "does this feature set beat chance
+    # on this data?" using every test row rather than a 20% slice.
+    if len(set(pooled_y.tolist())) == 2:
+        try:
+            pooled_auc = roc_auc_score(pooled_y, pooled_p)
+        except ValueError:
+            pooled_auc = float("nan")
+        if math.isfinite(pooled_auc):
+            null_pooled = _walk_forward_null(
+                ds, test_size, seed, folds, embargo_ms, n_perm=n_perm,
+            )
+            _report_permutation(pooled_y, pooled_auc, null_pooled)
+
+
+def _walk_forward_null(
+    ds: Dataset, test_size: float, seed: int, folds: int, embargo_ms: int,
+    n_perm: int = 10,
+) -> np.ndarray:
+    """Pooled shuffled-label AUCs under the same walk-forward split.
+
+    Mirrors `_walk_forward`'s fold loop but permutes the training labels before
+    each fit, then pools the out-of-sample probabilities exactly as the real
+    run does. Returns one AUC per permutation, each computed on the full pooled
+    set of test rows — so the comparison to the real pooled AUC is like-for-like.
+    """
+    rng = np.random.default_rng(seed)
+    splitter = TimeSeriesSplit(n_splits=folds)
+    splits = list(splitter.split(ds.X))
+
+    null_aucs: list[float] = []
+    for _ in range(n_perm):
+        pooled_y: list[int] = []
+        pooled_p: list[float] = []
+        for tr, te in splits:
+            test_start = ds.entry_at[te[0]]
+            keep = ds.entry_at[tr] + ds.horizon_ms + embargo_ms <= test_start
+            tr_p = tr[keep]
+            if len(tr_p) < 20:
+                continue
+            shuffled = rng.permutation(ds.y[tr_p])
+            if len(set(shuffled.tolist())) < 2:
+                continue
+            model = build_model(seed)
+            model.fit(ds.X[tr_p], shuffled)
+            pooled_y.extend(ds.y[te].tolist())
+            pooled_p.extend(model.predict_proba(ds.X[te])[:, 1].tolist())
+        if len(set(pooled_y)) < 2:
+            continue
+        try:
+            null_aucs.append(roc_auc_score(np.asarray(pooled_y), np.asarray(pooled_p)))
+        except ValueError:
+            continue
+    return np.asarray(null_aucs, dtype=float)
 
 
 def main() -> int:
@@ -706,6 +766,13 @@ def main() -> int:
         default=0.92,
         help="net profit per unit stake on a win; sets the break-even win rate",
     )
+    parser.add_argument(
+        "--permutations",
+        type=int,
+        default=10,
+        help="shuffled-label controls for the null distribution (default: 10). "
+        "Raise it for a finer p-value; each one is a full refit.",
+    )
     parser.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_CONFIDENCE)
     parser.add_argument("--no-trade-low", type=float, default=DEFAULT_NO_TRADE_LOW)
     parser.add_argument("--no-trade-high", type=float, default=DEFAULT_NO_TRADE_HIGH)
@@ -719,7 +786,7 @@ def main() -> int:
             args.data, args.model, args.test_size, args.seed, args.min_rows,
             args.walk_forward, args.folds, args.embargo_ms, args.payout,
             args.min_confidence, args.no_trade_low, args.no_trade_high,
-            args.max_volatility,
+            args.max_volatility, args.permutations,
         )
     except (FileNotFoundError, ValueError) as e:
         print(f"[error] {e}", file=sys.stderr)

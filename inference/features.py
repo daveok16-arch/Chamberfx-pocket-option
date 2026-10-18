@@ -53,6 +53,24 @@ NUMERIC_FEATURES: list[str] = [
 # One-hot asset columns, appended after the numeric block.
 ASSET_FEATURES: list[str] = [f"asset_{a}" for a in ASSETS]
 
+# The keys `build_vector` reads *directly* from a raw feature record. The
+# remaining FEATURE_NAMES entries (rangePct, avgAbsDeltaPct, stdDevPct) are
+# derived here by dividing by `open`, so they never appear in a record and must
+# not be looked for there — a schema check against FEATURE_NAMES would flag
+# them on every row. Keep this list in sync with the `_f(features, ...)` calls
+# in `build_vector`.
+RAW_FEATURE_KEYS: list[str] = [
+    "tickCount",
+    "open",
+    "netChangePct",
+    "range",
+    "avgAbsDelta",
+    "stdDev",
+    "upRatio",
+    "windowSpanSec",
+    "recentMomentumPct",
+]
+
 FEATURE_NAMES: list[str] = NUMERIC_FEATURES + ASSET_FEATURES
 
 

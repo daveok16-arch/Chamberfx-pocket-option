@@ -283,7 +283,26 @@ enable delivery), `SIGNAL_COOLDOWN_MS` (300000).
   is near a coin flip no matter what the features say. A longer horizon changes
   the problem, not just the model — it is the first lever to pull when there is
   no edge.
+- **Horizon experiment (240 rows @ 180s, one 104-minute session):** the pooled
+  walk-forward AUC rose to **0.612 vs a 60s 0.55**, and the pooled
+  shuffled-label control put that **above** the null spread, p=0.015 (n_perm=200).
+  The 60s horizon on the pre-change data showed no signal. Read: a longer horizon
+  is the first place signal appears, which is consistent with 60s being mostly
+  microstructure noise. **Do not treat this as an edge yet.** It is 240 rows from
+  a single session on 6 correlated pairs, the AUC is weak, and the economic
+  harness still reports the accepted-signal win-rate CI straddling break-even.
+  Confirm on fresh out-of-sample data before any conclusion.
+- **Why pool the walk-forward for the control:** the single-holdout control on
+  the same data says p=0.367 (48 test rows — no power) while the pooled control
+  says p=0.015. Same data, same model; only the number of test rows differs.
+  When they disagree, the pooled number is the better read. `--permutations N`
+  tunes the null resolution; each permutation is a full refit.
+- **Overlapping labels at long horizons:** window=60s with horizon=180s means
+  consecutive observations share 2/3 of their outcome window, so 240 rows are
+  not 240 independent samples. The permutation null is built with the *same*
+  overlap and folds, so the comparison stays like-for-like, but the effective
+  sample size is well below 240.
 - **Still missing:** no LICENSE file; retraining is time-based, not triggered by
-  data growth. **The baseline remains a placeholder with no claimed edge, and
-  the pipeline still has no evidence of a real edge — validation is only as good
-  as the data.**
+  data growth. **The baseline remains a placeholder with no claimed edge. The
+  pipeline has one weak, unconfirmed hint of signal at a 180s horizon and
+  nothing more — validation is only as good as the data.**

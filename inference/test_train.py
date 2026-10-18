@@ -9,6 +9,8 @@ Run: python -m unittest test_train -v   (from inference/)
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -127,6 +129,70 @@ class TestHorizonMeasurement(unittest.TestCase):
             recs.append(r)
         ds = load_dataset(self._write(recs))
         self.assertEqual(ds.horizon_ms, 60_000)
+
+
+class TestSchemaDriftGuard(unittest.TestCase):
+    """The guard must fire on genuinely-absent raw keys and stay quiet on keys
+    that `build_vector` derives (rangePct etc.), which never appear in records.
+    Getting this backwards makes the guard cry wolf on every clean dataset."""
+
+    def _write(self, records: list[dict]) -> Path:
+        fh = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        json.dump(records, fh)
+        fh.close()
+        self.addCleanup(Path(fh.name).unlink, missing_ok=True)
+        return Path(fh.name)
+
+    def _record(self, base: int, i: int, feats: dict) -> dict:
+        return {
+            "type": "OBSERVATION",
+            "asset": "EURUSD_otc",
+            "entryAt": base + i * STEP_MS,
+            "resolvedAt": base + i * STEP_MS + 60_000,
+            "label": i % 2,
+            "features": feats,
+            "source": "test",
+        }
+
+    def _full_features(self) -> dict:
+        return {
+            "open": 1.15, "tickCount": 100, "netChangePct": 0.001,
+            "range": 1e-4, "avgAbsDelta": 1e-5, "stdDev": 2e-5,
+            "upRatio": 0.5, "windowSpanSec": 59.0, "recentMomentumPct": 0.0005,
+        }
+
+    def _run(self, records: list[dict]) -> str:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            load_dataset(self._write(records))
+        return buf.getvalue()
+
+    def test_clean_data_does_not_warn(self):
+        base = 1_789_863_600_000
+        recs = [self._record(base, i, self._full_features()) for i in range(20)]
+        out = self._run(recs)
+        self.assertNotIn("SCHEMA DRIFT", out)
+
+    def test_derived_keys_absent_do_not_warn(self):
+        """rangePct/avgAbsDeltaPct/stdDevPct are computed in build_vector, so
+        their absence from a record is normal — not drift."""
+        base = 1_789_863_600_000
+        feats = self._full_features()
+        for derived in ("rangePct", "avgAbsDeltaPct", "stdDevPct"):
+            self.assertNotIn(derived, feats)
+        recs = [self._record(base, i, feats) for i in range(20)]
+        self.assertNotIn("SCHEMA DRIFT", self._run(recs))
+
+    def test_absent_renamed_key_warns(self):
+        base = 1_789_863_600_000
+        recs = []
+        for i in range(20):
+            f = self._full_features()
+            del f["recentMomentumPct"]  # the pre-rename schema
+            recs.append(self._record(base, i, f))
+        out = self._run(recs)
+        self.assertIn("SCHEMA DRIFT", out)
+        self.assertIn("recentMomentumPct", out)
 
 
 if __name__ == "__main__":
