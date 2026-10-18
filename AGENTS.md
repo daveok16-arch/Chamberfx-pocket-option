@@ -269,6 +269,20 @@ enable delivery), `SIGNAL_COOLDOWN_MS` (300000).
   spread (real 0.5508 vs null [0.373, 0.613], p=0.40 → no signal), and on
   synthetic data with a planted relationship it reports ABOVE the spread
   (real 1.0000, p=0.000). It is a working test, not a rubber stamp.
+- **Label horizon is now configurable (`--horizon` / `HORIZON`, 60|180|300).**
+  Before this, `--period` changed only the candle engine and the collector was
+  built without a `horizonMs`, so every label resolved at 60s regardless.
+  `capture.ts` now passes it through and `/health` reports `labelHorizon`.
+  `train.py` derives the purge horizon from the data (median of
+  `resolvedAt - entryAt`), so a 180s dataset is purged over 180s. Without that,
+  training rows in the 60-180s band before the test seam keep labels built from
+  test-period prices — silent leakage that inflates the score. `test_train.py`
+  (stdlib unittest, no new deps) pins it: a row one step before the seam is
+  purged at 180s and kept at 60s; the test fails on the old constant purge.
+  Rationale: a 60s horizon is dominated by microstructure noise, so the label
+  is near a coin flip no matter what the features say. A longer horizon changes
+  the problem, not just the model — it is the first lever to pull when there is
+  no edge.
 - **Still missing:** no LICENSE file; retraining is time-based, not triggered by
   data growth. **The baseline remains a placeholder with no claimed edge, and
   the pipeline still has no evidence of a real edge — validation is only as good

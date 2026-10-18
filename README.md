@@ -74,6 +74,27 @@ environment variable (used by Render):
 PERIOD=180 npx tsx capture.ts
 ```
 
+### Label horizon (`--horizon`)
+
+`--period` sets the **candle** size. `--horizon` sets how far ahead the **label**
+is measured — "will the price be higher in N seconds?" — and the two are
+independent. The feature window stays 60s either way.
+
+```bash
+npx tsx capture.ts --horizon 180     # 3-minute label horizon
+HORIZON=300 npx tsx capture.ts       # via env
+```
+
+A 60s horizon is dominated by microstructure noise: the price barely moves in a
+minute, so the label is close to a coin flip no matter what the features say.
+A 180s or 300s horizon gives a real move room to develop. This is the first
+lever to pull when a model shows no edge — it changes the *problem*, not just
+the model.
+
+Training reads the horizon back out of the data (median of
+`resolvedAt - entryAt`), so the purge always matches what the collector
+actually produced. You do not need to tell `train.py` the horizon.
+
 ---
 
 ## ML pipeline (Phases 1-3)
@@ -272,6 +293,7 @@ so predictions are `[ML]` once a model is trained and `[BASE]` (baseline) until 
 |----------|----------|-------------|
 | `PORT`   | no (default 10000) | HTTP health server port (Render sets this) |
 | `PERIOD` | no (default 60)   | Candle period in seconds: `60` \| `180` \| `300` |
+| `HORIZON` | no (default 60)  | Label horizon in seconds: `60` \| `180` \| `300` |
 | `SIGNALS_FILE` | no (default `/app/data/signals.json`) | labelled dataset — put it on the disk |
 | `FEATURES_FILE` | no (default `/app/data/live-prices.json`) | live feature snapshot |
 | `MODEL_FILE` | no (default `/app/data/model.pkl`) | trained model served by the inference service |

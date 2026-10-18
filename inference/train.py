@@ -161,6 +161,36 @@ def load_dataset(path: Path) -> Dataset:
     if skipped:
         print(f"[data] skipped {skipped} malformed record(s)")
 
+    # Schema drift guard. `build_vector` reads a missing feature as 0.0, which
+    # is the right call for a stray partial record — but if a whole batch of
+    # rows predates a feature rename, those rows get 0.0 for a column that
+    # means something real for every other row. The model then trains on one
+    # column with two meanings. Warn loudly rather than let that pass.
+    numeric_keys = [k for k in FEATURE_NAMES if not k.startswith("asset_")]
+    missing_counts = {k: 0 for k in numeric_keys}
+    for rec in raw:
+        if not isinstance(rec, dict):
+            continue
+        feats = rec.get("features")
+        if not isinstance(feats, dict):
+            continue
+        for k in numeric_keys:
+            if k not in feats:
+                missing_counts[k] += 1
+    drifted = {k: c for k, c in missing_counts.items() if c > 0}
+    if drifted:
+        print(
+            "\n[data] !! SCHEMA DRIFT — these feature keys are absent in some "
+            "rows and will be read as 0.0:"
+        )
+        for k, c in sorted(drifted.items(), key=lambda t: -t[1]):
+            print(f"         {k:<20} missing in {c} row(s)")
+        print(
+            "       Rows from before a feature rename are NOT comparable with\n"
+            "       current rows. Training on a mix produces a model that is\n"
+            "       silently wrong. Point --data at one schema only.\n"
+        )
+
     # Chronological order is the whole point: every split below relies on it.
     rows.sort(key=lambda r: r[0])
 
