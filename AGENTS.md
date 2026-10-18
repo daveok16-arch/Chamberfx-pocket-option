@@ -54,8 +54,11 @@ with its own safety design.
   sent as ONE message per bucket (`formatBatch`), because every asset is scored
   against the same wall-clock-aligned bucket and would otherwise burst into six
   separate messages for a single market moment. Per-asset cooldown
-  (`SIGNAL_COOLDOWN_MS`, default 5 min) is applied at flush time and prevents the
-  ~360 msg/hour a 6-asset every-minute cadence would otherwise produce.
+  (`SIGNAL_COOLDOWN_MS`, default 5 min) is applied at flush time. That default
+  predates batching: it was sized for the ~360 msg/hour an unbatched 6-asset
+  every-minute cadence would produce. With batching the ceiling is one message
+  per bucket (<=60/hour), so a deployment that must deliver *every* window sets
+  `SIGNAL_COOLDOWN_MS=0`; at the default most windows are throttled away.
   `telegram.sent` counts messages; `telegram.signals` counts signals inside them.
   Sends are serialised; failures are counted, never fatal. Shutdown drains the
   pending batch before exit.

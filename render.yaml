@@ -62,6 +62,11 @@ services:
         value: /app/data/model.pkl
       - key: RETRAIN_INTERVAL_SEC
         value: "1800"
+      # Deliver every 60s window rather than one signal per asset every 5 min.
+      # Safe because batching already collapses a bucket to a single message,
+      # so the ceiling is 60/hour, not the 360/hour the 5-min default assumed.
+      - key: SIGNAL_COOLDOWN_MS
+        value: "0"
       # Secrets: `sync: false` means Render prompts for these in the dashboard
       # rather than storing them in source. Delivery stays off until both are set.
       - key: TELEGRAM_BOT_TOKEN

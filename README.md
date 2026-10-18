@@ -227,8 +227,12 @@ TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... npx tsx capture.ts
   The cooldown is applied at flush time, so a batch contains only assets that
   were actually due. `/health` reports `telegram.sent` (messages) separately
   from `telegram.signals` (signals carried inside them).
-- Per-asset cooldown (`SIGNAL_COOLDOWN_MS`, default 300000 = 5 min) keeps a
-  6-asset, every-minute cadence from flooding the chat with the same state.
+- Per-asset cooldown (`SIGNAL_COOLDOWN_MS`, default 300000 = 5 min). The
+  default is conservative: it assumes unbatched delivery, where a 6-asset
+  every-minute cadence would be ~360 messages/hour. Batching already collapses
+  each bucket to one message (<=60/hour), so a delivery-every-window deployment
+  can set `SIGNAL_COOLDOWN_MS=0` and still send at most one message per minute.
+  Left at the default, most qualifying windows are throttled rather than sent.
 - Delivery is best-effort: failures are counted (`telegram.failed` on
   `/health`), never fatal to capture.
 - Nothing here can place a trade — it is a notification path only.
@@ -339,7 +343,7 @@ so predictions are `[ML]` once a model is trained and `[BASE]` (baseline) until 
 | `RETRAIN_INTERVAL_SEC` | no (default 1800) | retrain cadence |
 | `TELEGRAM_BOT_TOKEN` | no | enables delivery when set with `TELEGRAM_CHAT_ID` |
 | `TELEGRAM_CHAT_ID` | no | delivery target |
-| `SIGNAL_COOLDOWN_MS` | no (default 300000) | per-asset delivery cooldown |
+| `SIGNAL_COOLDOWN_MS` | no (default 300000) | per-asset delivery cooldown; `0` delivers every window |
 | `SIGNAL_BATCH_WINDOW_MS` | no (default 2000) | gather a bucket's signals into one message; `0` sends one per signal |
 
 ---
