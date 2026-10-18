@@ -49,7 +49,7 @@ sides of the split — and reports an optimistic score. Training instead:
    over 180s, so the seam cannot leak;
 3. optionally runs **expanding-window walk-forward** (`--walk-forward --folds N`)
    and reports the AUC spread across folds;
-4. fits an **isotonic calibration** map on a purged slice, because a forest's
+4. fits a **Platt (sigmoid) calibration** map on a purged slice, because a forest's
    `predict_proba` is only "calibrated-ish" and the confidence gate acts on the
    probability's magnitude;
 5. prints an **economic harness** — win rate and Wilson 95% CI for the
@@ -82,7 +82,7 @@ training slice only, so it discards the rest. `--refit-full` refits the forest
 on every non-test row after evaluation (metrics unchanged), so the deployed
 model uses the whole dataset. The retrain loop passes it. The calibrator is
 reused rather than refit: it was fit out-of-sample, and refitting it on rows the
-forest had seen would make the isotonic map over-confident.
+forest had seen would make the calibration map over-confident.
 
 The artifact written to `model.pkl` is a `CalibratedModel` (forest + optional
 calibrator) from `model_bundle.py`, so `/predict` serves calibrated

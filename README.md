@@ -39,7 +39,7 @@ inference/
   app.py               FastAPI service: /predict /health /reload
   train.py             Trains model.pkl from signals.json (time-series validation)
   features.py          Shared feature contract (train + serve)
-  model_bundle.py      CalibratedModel artifact (forest + isotonic calibrator)
+  model_bundle.py      CalibratedModel artifact (forest + Platt calibrator)
   requirements.txt     Python dependencies
   README.md            Inference service docs
 Dockerfile             (repo root) Render.com deployment image (both services)

@@ -21,6 +21,7 @@ import joblib
 from sklearn.metrics import roc_auc_score
 
 from features import FEATURE_NAMES
+from model_bundle import PlattCalibrator
 from train import (
     Dataset,
     _report_block_null,
@@ -324,6 +325,56 @@ class TestRefitFull(unittest.TestCase):
             n_full, n_plain,
             "refit-full saved a model that did not see more rows than the default",
         )
+
+
+class TestCalibratorDoesNotSaturate(unittest.TestCase):
+    """The calibrator must not turn a middling raw score into certainty.
+
+    Isotonic regression is non-parametric: on the ~30-row calibration slices
+    this project produces it steps straight to exactly 0.0/1.0. The confidence
+    filter reads 1.0 as certainty, so a raw 0.58 would mint a full-confidence
+    signal — and the live engine showed exactly that (P(UP)=1.0000 in the logs).
+    Platt has two parameters, so it stays strictly inside (0, 1).
+    """
+
+    def _slice(self, n: int = 40) -> tuple[np.ndarray, np.ndarray]:
+        rng = np.random.default_rng(7)
+        raw = rng.uniform(0.3, 0.7, size=n)
+        # A real but weak relationship, so the fit is not degenerate.
+        y = (raw + rng.normal(0, 0.25, size=n) > 0.5).astype(int)
+        if len(set(y.tolist())) < 2:
+            y[0], y[1] = 0, 1
+        return raw, y
+
+    def test_platt_stays_inside_the_open_unit_interval(self):
+        raw, y = self._slice()
+        cal = PlattCalibrator.fit(raw, y)
+        out = cal.predict(np.array([0.0, 0.05, 0.5, 0.95, 1.0]))
+        self.assertTrue(np.all(out > 0.0) and np.all(out < 1.0), out)
+        self.assertFalse(np.any(out == 0.0) or np.any(out == 1.0))
+
+    def test_platt_is_monotone_and_finite(self):
+        raw, y = self._slice()
+        cal = PlattCalibrator.fit(raw, y)
+        grid = np.linspace(0, 1, 50)
+        out = cal.predict(grid)
+        self.assertTrue(np.all(np.isfinite(out)))
+        self.assertTrue(np.all(np.diff(out) >= -1e-12), "Platt map is not monotone")
+
+    def test_platt_survives_pickle_round_trip(self):
+        """Serving unpickles the bundle in a different process; the calibrator
+        must round-trip like `CalibratedModel` does."""
+        import joblib
+        import tempfile
+        from pathlib import Path
+
+        raw, y = self._slice()
+        cal = PlattCalibrator.fit(raw, y)
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "c.pkl"
+            joblib.dump(cal, p)
+            back = joblib.load(p)
+        np.testing.assert_allclose(cal.predict(raw), back.predict(raw))
 
 
 if __name__ == "__main__":

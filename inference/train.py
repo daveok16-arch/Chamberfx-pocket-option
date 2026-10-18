@@ -21,7 +21,7 @@ therefore:
      an embargo gap, so no label window straddles the boundary;
   3. optionally runs WALK-FORWARD evaluation (expanding window, several folds)
      to expose regime dependence instead of reporting one lucky split;
-  4. fits an isotonic CALIBRATION map on a purged slice, because a RandomForest's
+  4. fits a Platt (sigmoid) CALIBRATION map on a purged slice, because a RandomForest's
      `predict_proba` is only "calibrated-ish" and the downstream confidence gate
      acts on the probability's magnitude, not just its ranking;
   5. reports an ECONOMIC harness — win rate and Wilson CI for the post-filter
@@ -47,7 +47,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.isotonic import IsotonicRegression
+
 from sklearn.metrics import (
     accuracy_score,
     brier_score_loss,
@@ -59,7 +59,7 @@ from sklearn.metrics import (
 from sklearn.model_selection import TimeSeriesSplit
 
 from features import FEATURE_NAMES, RAW_FEATURE_KEYS, build_vector
-from model_bundle import CalibratedModel
+from model_bundle import CalibratedModel, PlattCalibrator
 
 # A model trained on a handful of rows is worse than no model: it produces
 # confident-looking probabilities from noise. Refuse to emit one below this.
@@ -366,11 +366,16 @@ def economic_harness(
 def _fit_calibrated(
     X_tr: np.ndarray, y_tr: np.ndarray, X_cal: np.ndarray, y_cal: np.ndarray, seed: int
 ):
-    """Fit the forest, then an isotonic map on a purged calibration slice.
+    """Fit the forest, then a Platt (sigmoid) map on a purged calibration slice.
 
     Returns (model, calibrator_or_None). The calibrator is None when the slice
     is too small or single-class to fit — in that case raw probabilities are
     used and the caller says so.
+
+    Platt, not isotonic: isotonic is non-parametric and, on the ~30-row slices
+    available here, steps to exactly 0.0/1.0. The confidence filter downstream
+    reads that as certainty, so a handful of calibration points would mint
+    full-confidence signals out of a 0.58 raw score. See `PlattCalibrator`.
     """
     model = build_model(seed)
     model.fit(X_tr, y_tr)
@@ -379,9 +384,7 @@ def _fit_calibrated(
     if len(y_cal) >= 30 and len(set(y_cal.tolist())) == 2:
         raw = model.predict_proba(X_cal)[:, 1]
         try:
-            iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
-            iso.fit(raw, y_cal)
-            calibrator = iso
+            calibrator = PlattCalibrator.fit(raw, y_cal)
         except ValueError:
             calibrator = None
     return model, calibrator
@@ -556,9 +559,9 @@ def train(
             ds.X[fit_idx], ds.y[fit_idx], ds.X[cal_idx], ds.y[cal_idx], seed
         )
         if calibrator is None:
-            print("[calib] calibration slice too small/single-class — using raw probabilities")
+            print("[calib] calibration slice too small/single-class - using raw probabilities")
         else:
-            print(f"[calib] isotonic fitted on {len(cal_idx)} purged row(s)")
+            print(f"[calib] Platt (sigmoid) fitted on {len(cal_idx)} purged row(s)")
 
         X_te, y_te = ds.X[test_idx], ds.y[test_idx]
         raw = model.predict_proba(X_te)[:, 1]
@@ -566,7 +569,7 @@ def train(
 
         _report_metrics("held-out performance (raw probabilities)", y_te, raw, X_te)
         if calibrator is not None:
-            _report_metrics("held-out performance (isotonic-calibrated)", y_te, cal, X_te)
+            _report_metrics("held-out performance (calibrated)", y_te, cal, X_te)
 
         proba = cal if calibrator is not None else raw
         economic_harness(
@@ -600,7 +603,7 @@ def train(
                 print(f"  {name:<18} {imp:.4f}")
 
         # Persist the calibrated model so serving applies the same map. The
-        # isotonic step is bundled with the forest so `predict_proba` downstream
+        # calibration step is bundled with the forest so `predict_proba` downstream
         # stays a single call.
         #
         # By default we save the model that produced the metrics above, which was
@@ -609,7 +612,7 @@ def train(
         # row (still excluding the purged band and the test period, so the
         # reported metrics remain valid). The calibrator is *reused*, not refit:
         # it was fit out-of-sample on `cal_idx`, and refitting it here would fit
-        # it on rows the forest had already seen — in-sample isotonic is
+        # it on rows the forest had already seen — in-sample calibration is
         # over-confident, which is exactly the failure the calibrator exists to
         # avoid. Reusing the out-of-sample map keeps calibration honest while the
         # forest still sees all available rows. Deployment-only; evaluation is

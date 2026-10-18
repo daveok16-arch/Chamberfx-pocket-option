@@ -1,7 +1,7 @@
 """
 Model artifact wrapper shared by training and serving.
 =====================================================
-Bundles the fitted forest with its optional isotonic calibrator so a single
+Bundles the fitted forest with its optional probability calibrator so a single
 `model.pkl` serves calibrated probabilities.
 
 This lives in its own module — not in `train.py` — for a specific reason:
@@ -21,6 +21,38 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+
+
+class PlattCalibrator:
+    """Sigmoid (Platt) calibration: a 1-D logistic map from raw score to probability.
+
+    Preferred over isotonic at the sample sizes this project actually has.
+    Isotonic is non-parametric: with few calibration points it steps straight to
+    exactly 0.0 or 1.0, and the confidence filter downstream reads that as
+    certainty. Platt has two parameters, so it stays monotone, smooth, and
+    bounded away from 0/1 while still correcting the score's level.
+
+    Exposes `predict` (returning probabilities) rather than `predict_proba`, so
+    it is a drop-in for the calibrator slot in `CalibratedModel`. Defined here,
+    not in `train.py`, for the same pickling reason as `CalibratedModel`.
+    """
+
+    def __init__(self, coef: float, intercept: float) -> None:
+        self.coef = float(coef)
+        self.intercept = float(intercept)
+
+    @classmethod
+    def fit(cls, raw: np.ndarray, y: np.ndarray) -> "PlattCalibrator":
+        """Fit the logistic map on a held-out calibration slice."""
+        from sklearn.linear_model import LogisticRegression
+
+        lr = LogisticRegression(max_iter=1000)
+        lr.fit(np.asarray(raw, dtype=float).reshape(-1, 1), y)
+        return cls(lr.coef_[0][0], lr.intercept_[0])
+
+    def predict(self, raw: np.ndarray) -> np.ndarray:
+        z = self.coef * np.asarray(raw, dtype=float) + self.intercept
+        return 1.0 / (1.0 + np.exp(-z))
 
 
 class CalibratedModel:

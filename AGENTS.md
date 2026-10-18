@@ -68,12 +68,12 @@ with its own safety design.
   Validation is TIME-SERIES aware: it sorts by `entryAt`, splits
   chronologically, PURGES training rows whose 60s label horizon overlaps the
   test period (plus an `--embargo-ms` gap), optionally runs expanding-window
-  walk-forward (`--walk-forward --folds N`), fits an isotonic CALIBRATION map on
+  walk-forward (`--walk-forward --folds N`), fits a Platt (sigmoid) CALIBRATION map on
   a purged slice, and prints an ECONOMIC harness (post-filter win rate + Wilson
   95% CI vs the `--payout` break-even). Shuffled splits were removed because
   autocorrelated overlapping windows leak across the boundary.
 - `inference/model_bundle.py` -- `CalibratedModel`, the artifact written to
-  `model.pkl`: the forest plus its optional isotonic calibrator. Lives in its own
+  `model.pkl`: the forest plus its optional probability calibrator. Lives in its own
   module (not `train.py`) so `joblib` can unpickle it in the serving process;
   exposes `n_features_in_`/`predict_proba` so `app.py` needs no special-casing.
   Also carries `feature_names` (the training schema) so serving can refuse a
@@ -211,7 +211,7 @@ enable delivery), `SIGNAL_COOLDOWN_MS` (300000).
     this, `autoDeploy: true` silently wiped all collected labels on every push.
   * `train.py` no longer shuffles. It sorts by `entryAt`, splits
     chronologically, purges rows whose 60s horizon overlaps the test set (plus
-    an embargo), supports expanding-window walk-forward, fits isotonic
+    an embargo), supports expanding-window walk-forward, fits Platt (sigmoid)
     calibration on a purged slice, and prints an economic harness (post-filter
     win rate + Wilson CI vs payout break-even). On random data it now reports
     "inconclusive" instead of a spuriously confident number.
@@ -331,6 +331,31 @@ enable delivery), `SIGNAL_COOLDOWN_MS` (300000).
   loop) refits the forest on all of `train_idx` after evaluation, so deployment
   uses ~80% of rows while the reported metrics stay exactly the same (they still
   come from the held-out fit). The calibrator is reused, not refit: refitting it
-  on rows the forest had already seen would fit an in-sample isotonic map, which
+  on rows the forest had already seen would fit an in-sample calibration map, which
   is over-confident — the exact failure the calibrator exists to prevent. Test
   pins the artifact: the saved model's first tree sees more rows with the flag.
+- **Isotonic calibration was replaced by Platt (sigmoid) — found by running the
+  bot, not by reading it.** Live logs showed `[PREDICT] XAUUSD_otc P(UP)=1.0000`
+  — exact certainty out of a weak model. Cause: isotonic regression is
+  non-parametric, and on the ~30–35-row calibration slices this dataset
+  produces it steps straight to exactly 0.0 or 1.0. On a 180s holdout it
+  collapsed 48 distinct raw probabilities into 5 values, emitted exact 0/1 for
+  18/48 windows, and inflated the share of windows clearing the 0.65 confidence
+  gate from 9/48 to 30/48 — a 3.3× over-emission of "confident" signals, with
+  Brier 0.3015 and log-loss 5.69 (vs 0.2413 / 0.6751 raw). Platt has two
+  parameters, so the map is smooth, monotone, and strictly inside (0,1): Brier
+  0.2485, AUC unchanged at 0.6017, and `P(UP)=1.0000` no longer appears. This is
+  the concrete failure the "the gate reads probability magnitude, not just
+  ranking" note was warning about — a miscalibrated map does not merely look
+  bad, it mints full-confidence signals. `PlattCalibrator` lives in
+  `model_bundle.py` (same unpickling reason as `CalibratedModel`);
+  `TestCalibratorDoesNotSaturate` pins the open-unit-interval, monotonicity, and
+  pickle round-trip properties.
+- **Operating note:** a `model.pkl` written with a new class cannot be hot-loaded
+  by a *running* uvicorn that predates that class — `MODEL_AUTO_RELOAD` fails
+  with `Can't get attribute 'PlattCalibrator'`. Restart the inference service
+  once after deploying a new calibrator class; auto-reload then works normally.
+- **Operating note:** the collector's horizon must match the dataset. Running at
+  `HORIZON=60` against a file of 180s labels appends mixed-horizon rows, and
+  `train.py` refuses the file (by design). Keep `HORIZON` aligned with the
+  existing `signals.json`.
