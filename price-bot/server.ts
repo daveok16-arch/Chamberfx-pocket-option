@@ -78,6 +78,10 @@ export interface PriceCaptureConfig {
    *  packet. Defaults to candlePeriod. Pocket Option returns history at this
    *  granularity, so it must match candlePeriod for correct seeding. */
   subscribePeriod?: number;
+  /** Force a reconnect when the socket is open but no tick has arrived for this
+   *  many ms. Guards against the half-open state where the WebSocket is up and
+   *  isConnected() is true but the stream has silently stopped. */
+  livenessTimeoutMs?: number;
 }
 
 // ============================================
@@ -101,7 +105,8 @@ const DEFAULT_CONFIG: PriceCaptureConfig = {
   verbose: true,
   reconnectDelay: 3000,
   maxReconnectAttempts: 10,
-  candlePeriod: 60
+  candlePeriod: 60,
+  livenessTimeoutMs: 90_000
 };
 
 // ============================================
@@ -123,6 +128,11 @@ export class PocketOptionPriceBot {
   
   // Binary attachment handling
   private pendingBinaryEvent: string | null = null;
+
+  // Liveness watchdog: last tick time on the container clock (not the server
+  // clock) plus the interval handle.
+  private lastTickWallClock: number = 0;
+  private livenessTimer: NodeJS.Timeout | null = null;
   
   // Price history (for export)
   private priceHistory: Map<string, Tick[]> = new Map();
@@ -165,6 +175,27 @@ export class PocketOptionPriceBot {
   // ============================================
   // SESSION DISCOVERY (Playwright)
   // ============================================
+
+  /**
+   * Adopt credentials from a fresh session discovery, keeping the last
+   * known-good values for anything discovery failed to capture.
+   *
+   * Discovery is racy: it waits a fixed 8s for the page to emit its auth frame,
+   * and that frame does not always arrive in time. A reconnect that adopts an
+   * empty auth packet clears the previous good one, and the socket then opens
+   * unauthenticated -- it joins the namespace and subscribes, but receives no
+   * ticks, while `isConnected()` keeps reporting true. Merging instead of
+   * overwriting means a failed rediscovery cannot downgrade a working session.
+   */
+  private adoptDiscoveredSession(session: {
+    url: string;
+    authPacket: string;
+    cookies: string;
+  }): void {
+    if (session.url) this.discoveredWsUrl = session.url;
+    if (session.authPacket) this.cachedAuthPacket = session.authPacket;
+    if (session.cookies) this.cachedCookies = session.cookies;
+  }
 
   /**
    * Discover Pocket Option WebSocket URL and session credentials using Playwright.
@@ -267,9 +298,7 @@ export class PocketOptionPriceBot {
       // Discover session if URL not provided
       if (!this.config.wsUrl) {
         const session = await this.discoverSession();
-        this.discoveredWsUrl = session.url;
-        this.cachedAuthPacket = session.authPacket;
-        this.cachedCookies = session.cookies;
+        this.adoptDiscoveredSession(session);
       } else {
         this.discoveredWsUrl = this.config.wsUrl;
         this.cachedCookies = this.config.cookies || "";
@@ -320,7 +349,59 @@ export class PocketOptionPriceBot {
     this.log("[WS] Connection opened");
     this.connected = true;
     this.reconnectAttempts = 0;
+    this.startLivenessWatchdog();
     this.connectListeners.forEach(cb => cb());
+  }
+
+  /**
+   * Start the liveness watchdog.
+   *
+   * The WebSocket can be open, with `connected === true`, while the price
+   * stream has silently stopped (an unauthenticated reconnect receives no
+   * ticks). Nothing else notices: the socket stays up, so no close event
+   * fires and no reconnect is scheduled. This forces one when ticks dry up.
+   */
+  private startLivenessWatchdog(): void {
+    this.stopLivenessWatchdog();
+    const timeout = this.config.livenessTimeoutMs ?? 90_000;
+    if (timeout <= 0) return;
+    this.lastTickWallClock = Date.now();
+
+    this.livenessTimer = setInterval(() => {
+      if (!this.hasStalled(Date.now())) return;
+      const idleSec = Math.round((Date.now() - this.lastTickWallClock) / 1000);
+      this.log(`[WS] No ticks for ${idleSec}s — forcing reconnect`);
+      this.stopLivenessWatchdog();
+      // terminate() rather than close() so handleClose still fires and
+      // schedules the reconnect even if the peer never answers the close frame.
+      this.ws?.terminate();
+    }, Math.max(5_000, Math.floor(timeout / 3)));
+    this.livenessTimer.unref?.();
+  }
+
+  /**
+   * Whether the socket is open but the tick stream has gone quiet.
+   *
+   * Split out from the interval so the decision is testable without a live
+   * socket. Returns false before the first tick, since a just-opened socket is
+   * legitimately idle until the subscription produces data.
+   *
+   * @param nowMs - Current container-clock time in ms.
+   */
+  private hasStalled(nowMs: number): boolean {
+    if (!this.connected) return false;
+    if (this.lastTickWallClock === 0) return false;
+    const timeout = this.config.livenessTimeoutMs ?? 90_000;
+    if (timeout <= 0) return false;
+    return nowMs - this.lastTickWallClock >= timeout;
+  }
+
+  /** Stop the liveness watchdog. Safe to call when it is not running. */
+  private stopLivenessWatchdog(): void {
+    if (this.livenessTimer) {
+      clearInterval(this.livenessTimer);
+      this.livenessTimer = null;
+    }
   }
 
   /**
@@ -514,6 +595,9 @@ export class PocketOptionPriceBot {
       asset.ticks.push(price);
       if (asset.ticks.length > 100) asset.ticks.shift();
 
+      // Feed the liveness watchdog (container clock, not the server clock).
+      this.lastTickWallClock = Date.now();
+
       // Update candles
       this.updateCandles(asset, price, timestamp);
 
@@ -701,6 +785,7 @@ export class PocketOptionPriceBot {
    */
   private handleClose(code: number, reason: string): void {
     this.log(`[WS] Connection closed (${code}): ${reason}`);
+    this.stopLivenessWatchdog();
     this.connected = false;
     this.disconnectListeners.forEach(cb => cb());
     this.scheduleReconnect();
@@ -760,6 +845,7 @@ export class PocketOptionPriceBot {
    * Disconnect from the WebSocket and clean up resources.
    */
   public disconnect(): void {
+    this.stopLivenessWatchdog();
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;

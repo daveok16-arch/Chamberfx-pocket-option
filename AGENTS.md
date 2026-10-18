@@ -477,3 +477,38 @@ Service `Chamberfx-pocket-option` (`srv-dbacaftg1s2s73bivrt0`), owner
   live run showed `sent 4 / throttled 43`; at `0` it is one message per 60s
   window with zero throttling. Batching already caps delivery at 60 msgs/hour, so
   the cooldown's original flood rationale no longer holds.
+
+### The silent stall: connected but no ticks (fixed 2026-10-18)
+
+Observed live: `[STATUS] ticks=1686` frozen for ~4.5 minutes across several
+reconnects while `/health` reported `connected: true` and candles stayed at 3
+per asset. The bot looked healthy and delivered nothing.
+
+**Cause.** `connect()` re-ran `discoverSession()` on every reconnect and
+overwrote the cached credentials unconditionally. Discovery waits a fixed 8s
+for the page to emit its auth frame, and that frame does not always arrive in
+time, so rediscovery often returns `authPacket: ""`. Adopting that cleared the
+last known-good packet, and the reconnect logged the tell:
+
+```
+[WS] No auth packet, subscribing directly...
+```
+
+The socket then opens, joins the namespace, and subscribes — all of which
+succeed and set `connected = true` — but an unauthenticated session receives no
+ticks. No close event fires either, so nothing schedules a recovery.
+
+**Fixes.**
+1. `adoptDiscoveredSession()` merges instead of overwriting: a field is only
+   taken from discovery when discovery actually found it, so a failed
+   rediscovery can no longer downgrade a working session.
+2. A liveness watchdog (`livenessTimeoutMs`, default 90s) terminates the socket
+   when it is open but has produced no tick for the timeout, which forces
+   `handleClose` → `scheduleReconnect`. This catches the half-open state from
+   any cause, not just this one. `hasStalled()` is split out so the decision is
+   testable without a live socket; `lastTickWallClock` uses the container clock
+   because the tick timestamps carry the broker's server clock.
+
+The tell to grep for in production logs is `No auth packet, subscribing
+directly` followed by a `ticks=` that stops increasing while `connected=true`.
+14 checks added to `price-bot/tests/run.ts` (109 → 123).

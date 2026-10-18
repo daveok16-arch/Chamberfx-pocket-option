@@ -528,6 +528,62 @@ section('deliverer — batch window drains to a single send');
 }
 
 // ============================================================
+section('engine — session merge and liveness watchdog');
+// ============================================================
+{
+  // Regression: a reconnect whose rediscovery captured no auth packet used to
+  // overwrite the cached one with "". The socket then opened unauthenticated,
+  // subscribed, and received no ticks while isConnected() reported true —
+  // observed live as ticks frozen for minutes behind connected: true.
+  const bot: any = new PocketOptionPriceBot({
+    defaultAssets: ['EURUSD_otc'],
+    candlePeriod: 60,
+    verbose: false,
+  });
+
+  bot.adoptDiscoveredSession({
+    url: 'wss://try-demo-eu.po.market/socket.io/?EIO=4&transport=websocket',
+    authPacket: '42["auth",{"token":"good"}]',
+    cookies: 'sid=abc',
+  });
+  check('adopts url', bot.discoveredWsUrl.includes('po.market'));
+  check('adopts auth packet', bot.cachedAuthPacket.includes('"auth"'));
+  check('adopts cookies', bot.cachedCookies === 'sid=abc');
+
+  // A later rediscovery that caught nothing must not clear what we have.
+  bot.adoptDiscoveredSession({ url: '', authPacket: '', cookies: '' });
+  check('empty rediscovery keeps auth packet', bot.cachedAuthPacket.includes('"auth"'));
+  check('empty rediscovery keeps cookies', bot.cachedCookies === 'sid=abc');
+  check('empty rediscovery keeps url', bot.discoveredWsUrl.includes('po.market'));
+
+  // A rediscovery with fresh credentials should win.
+  bot.adoptDiscoveredSession({ url: '', authPacket: '42["auth",{"token":"new"}]', cookies: '' });
+  check('fresh auth packet replaces the old one', bot.cachedAuthPacket.includes('"new"'));
+  check('empty cookies in rediscovery keep the old ones', bot.cachedCookies === 'sid=abc');
+
+  // Liveness: an open socket that has stopped delivering ticks must be treated
+  // as stalled, and a healthy or not-yet-started one must not.
+  const live: any = new PocketOptionPriceBot({
+    defaultAssets: ['EURUSD_otc'],
+    candlePeriod: 60,
+    verbose: false,
+    livenessTimeoutMs: 90_000,
+  });
+  live.connected = true;
+  live.lastTickWallClock = 0;
+  check('no stall before the first tick', live.hasStalled(Date.now()) === false);
+  live.lastTickWallClock = 1_000_000;
+  check('no stall while ticks are recent', live.hasStalled(1_000_000 + 89_999) === false);
+  check('stall at the threshold', live.hasStalled(1_000_000 + 90_000) === true);
+  check('stall well past the threshold', live.hasStalled(1_000_000 + 600_000) === true);
+  live.connected = false;
+  check('no stall reported while disconnected', live.hasStalled(1_000_000 + 600_000) === false);
+  live.connected = true;
+  live.config.livenessTimeoutMs = 0;
+  check('watchdog disabled by timeout 0', live.hasStalled(1_000_000 + 600_000) === false);
+}
+
+// ============================================================
 console.log('\n' + '='.repeat(60));
 if (failures.length === 0) {
   console.log(`ALL ${passed} CHECKS PASSED`);
