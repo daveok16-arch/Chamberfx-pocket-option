@@ -50,9 +50,30 @@ RETRAIN_INTERVAL_SEC="${RETRAIN_INTERVAL_SEC:-1800}"
 VENV_PY="$ROOT/inference/.venv/bin/python"
 UVICORN="$ROOT/inference/.venv/bin/uvicorn"
 
+MODEL_PATH="${MODEL_FILE:-$ROOT/inference/model.pkl}"
+SIGNALS_PATH="${SIGNALS_FILE:-$ROOT/price-bot/signals.json}"
+
 mkdir -p "$RUN_DIR"
 
 log() { echo "[supervisor] $*"; }
+
+# Block until the inference service reports a loaded model, or the deadline
+# passes. The engine has no baseline fallback, so starting capture before the
+# model is served would collect the first buckets without predicting them.
+# A timeout is not fatal: the retrain loop will produce a model and the service
+# auto-reloads it, at which point capture starts predicting.
+wait_for_model() {
+  local port="$1" tries="${2:-30}" i
+  for i in $(seq 1 "$tries"); do
+    if curl -sf "http://127.0.0.1:$port/health" 2>/dev/null | grep -q '"model_loaded":true'; then
+      log "inference serving a model on :$port"
+      return 0
+    fi
+    sleep 1
+  done
+  log "warn: no model served after ${tries}s — starting capture anyway (COLLECT-ONLY until a model appears)"
+  return 1
+}
 
 # ---------------------------------------------------------------- preflight --
 preflight() {
@@ -67,9 +88,19 @@ preflight() {
     log "       fix: cd price-bot && npm install"
     missing=1
   fi
-  if [ ! -f "$ROOT/inference/model.pkl" ]; then
-    log "warn: no model.pkl — the bot will run on the local baseline until one is trained"
-    log "      train: cd inference && .venv/bin/python train.py --data ../price-bot/signals.json --model model.pkl"
+  if [ ! -f "$MODEL_PATH" ]; then
+    # The engine runs on the model or not at all. Try to produce one now so a
+    # fresh setup starts on the model instead of collecting blindly; the retrain
+    # loop retries until the dataset is large enough, but a bootstrap attempt
+    # here means an existing dataset yields a serving model before first start.
+    log "no model at $MODEL_PATH — attempting to train one now"
+    if [ -s "$SIGNALS_PATH" ] && "$VENV_PY" "$ROOT/inference/train.py" \
+        --data "$SIGNALS_PATH" --model "$MODEL_PATH" --refit-full >/dev/null 2>&1; then
+      log "trained model -> $MODEL_PATH"
+    else
+      log "warn: could not train yet (dataset below the row floor or no data)."
+      log "      The engine will COLLECT-ONLY until the retrain loop produces a model."
+    fi
   fi
   return $missing
 }
@@ -208,19 +239,21 @@ start_bot() {
 
   log "starting (inference :$INFERENCE_PORT, engine :$PORT, period ${PERIOD}s, horizon ${HORIZON}s)"
 
-  # Inference first: the engine probes it at startup and falls back to the local
-  # baseline if it is unreachable, so ordering only affects the first bucket.
-  # uvicorn resolves `app:app` relative to its working directory, so it must run
-  # from inference/.
+  # Inference first: the engine scores every window through it and has no
+  # baseline fallback, so it must be serving the model before capture starts —
+  # otherwise the first buckets are collected but not predicted. Wait for
+  # /health to report a loaded model (bounded) before starting capture.
   supervise inference "$INFERENCE_LOG" \
-    env MODEL_FILE="${MODEL_FILE:-$ROOT/inference/model.pkl}" \
+    env MODEL_FILE="$MODEL_PATH" \
         MODEL_AUTO_RELOAD=1 PYTHONUNBUFFERED=1 \
     bash -c "cd '$ROOT/inference' && exec .venv/bin/uvicorn app:app --host 127.0.0.1 --port $INFERENCE_PORT" &
+
+  wait_for_model "$INFERENCE_PORT"
 
   supervise capture "$CAPTURE_LOG" \
     env NODE_ENV=production PORT="$PORT" PERIOD="$PERIOD" HORIZON="$HORIZON" \
         INFERENCE_URL="http://127.0.0.1:$INFERENCE_PORT" \
-        SIGNALS_FILE="${SIGNALS_FILE:-$ROOT/price-bot/signals.json}" \
+        SIGNALS_FILE="$SIGNALS_PATH" \
         FEATURES_FILE="${FEATURES_FILE:-$ROOT/price-bot/live-prices.json}" \
         TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}" \
         TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}" \
@@ -231,8 +264,8 @@ start_bot() {
 
   if [ "$RETRAIN_INTERVAL_SEC" -gt 0 ]; then
     supervise retrain "$RETRAIN_LOG" \
-      env SIGNALS_FILE="${SIGNALS_FILE:-$ROOT/price-bot/signals.json}" \
-          MODEL_FILE="${MODEL_FILE:-$ROOT/inference/model.pkl}" \
+      env SIGNALS_FILE="$SIGNALS_PATH" \
+          MODEL_FILE="$MODEL_PATH" \
           RETRAIN_INTERVAL_SEC="$RETRAIN_INTERVAL_SEC" \
       "$ROOT/deploy/retrain-loop.sh" &
   fi

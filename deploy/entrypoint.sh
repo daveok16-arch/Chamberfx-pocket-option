@@ -23,4 +23,22 @@ if [ ! -f "${SIGNALS_FILE:-$DATA_DIR/signals.json}" ]; then
   echo '[]' > "${SIGNALS_FILE:-$DATA_DIR/signals.json}"
 fi
 
+# Bootstrap a model before anything starts. The engine has no baseline
+# fallback, so a container that begins with no model would collect the first
+# buckets without predicting. If a dataset already exists on the disk this
+# trains one now; otherwise it is a harmless no-op and the retrain loop produces
+# the model once enough data has accumulated (the service auto-reloads it).
+MODEL="${MODEL_FILE:-$DATA_DIR/model.pkl}"
+SIGNALS="${SIGNALS_FILE:-$DATA_DIR/signals.json}"
+if [ ! -f "$MODEL" ] && [ -s "$SIGNALS" ]; then
+  echo "[entrypoint] no model at ${MODEL} — attempting to train one now"
+  if /app/venv/bin/python /app/inference/train.py \
+      --data "$SIGNALS" --model "$MODEL" --refit-full; then
+    chown botuser:botuser "$MODEL" 2>/dev/null || true
+    echo "[entrypoint] trained model -> ${MODEL}"
+  else
+    echo "[entrypoint] not enough data to train yet; retrain loop will produce a model"
+  fi
+fi
+
 exec /usr/bin/supervisord -c /app/deploy/supervisord.conf

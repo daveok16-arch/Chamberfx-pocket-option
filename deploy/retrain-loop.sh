@@ -52,8 +52,15 @@ INTERVAL="${RETRAIN_INTERVAL_SEC:-1800}"
 
 log "loop started (interval ${INTERVAL}s, data ${SIGNALS}, model ${MODEL}, python ${PYTHON})"
 
+# Attempt once before the first sleep. A fresh setup with an existing dataset
+# would otherwise run collect-only for a whole interval before the first model
+# appears; the whole point of the loop is that the bot runs on the model.
+first=1
 while true; do
-  sleep "$INTERVAL"
+  if [ "$first" -eq 0 ]; then
+    sleep "$INTERVAL"
+  fi
+  first=0
 
   if [ ! -s "$SIGNALS" ]; then
     log "no dataset at ${SIGNALS} yet — skipping"

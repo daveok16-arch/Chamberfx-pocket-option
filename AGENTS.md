@@ -40,14 +40,14 @@ with its own safety design.
   `evaluateSignal(prediction, features)` returns an accepted `ValidSignal`
   (`{timestamp, asset, direction:'CALL'|'PUT', confidence}`) or a discard reason.
   Confidence is `max(P, 1-P)`.
-- `price-bot/predictor.ts` -- the prediction layer. `Predictor` interface with
-  two implementations: `LocalPredictor` (deterministic baseline — trend +
-  momentum + tick-imbalance, scaled by the window's own volatility; always
-  answers, output clamped to [0.02, 0.98]) and `PredictionRouter` (prefers the
-  ML service, falls back to the baseline when `INFERENCE_URL` is unset, the
-  service is down, or no model is trained). Every prediction carries
-  `source: 'ml' | 'local-baseline'`, so an ML answer is never confused with a
-  baseline one. The baseline is a placeholder, NOT a claimed edge.
+- `price-bot/predictor.ts` -- the prediction layer, ML-only. `Predictor`
+  interface; `MlPredictor` wraps the inference client and tags every result
+  `source: 'ml'`; `PredictionRouter` forwards to it and returns null when no
+  model is served. There is **no baseline fallback**: a missing model (no
+  `INFERENCE_URL`, service down, 503 untrained) means the window is not
+  predicted. The engine then runs COLLECT-ONLY — it keeps building the dataset
+  but emits no predictions, signals or deliveries. A placeholder's guesses are
+  never shipped to a chat.
 - `price-bot/deliverer.ts` -- `TelegramDeliverer`. Ships accepted signals to a
   Telegram chat when `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` are set; inert
   otherwise. Signals are gathered over `SIGNAL_BATCH_WINDOW_MS` (default 2s) and
@@ -160,7 +160,7 @@ CI (`.github/workflows/ci.yml`) runs typecheck + `npm test` on Node, and on
 Python: compile, the unit tests (`test_train.py` + `test_app.py`), then a train
 smoke test on a synthetic dataset.
 
-Inference env vars: `INFERENCE_URL` (unset = baseline predictor only),
+Inference env vars: `INFERENCE_URL` (unset = COLLECT-ONLY, no predictions),
 `INFERENCE_TIMEOUT_MS` (5000), `MODEL_FILE` (./model.pkl),
 `MODEL_AUTO_RELOAD` (1), `PREDICTION_THRESHOLD` (0.5).
 Delivery env vars: `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (both required to
@@ -236,20 +236,14 @@ counterpart to `deploy/supervisord.conf`.
     training runs end-to-end, calibrated `model.pkl` serves through `app.py`
     (`/health`, `/predict`, `/reload`).
 - **Always-on prediction + delivery implemented 2026-10-16** (`predictor.ts`,
-  `deliverer.ts`). This is the change that makes it a *prediction* bot rather
-  than a data collector:
-  * Every closed 60s window is now scored, even with no trained model and no
-    inference service. `LocalPredictor` (deterministic baseline) answers when
-    the ML path is unavailable; `PredictionRouter` prefers the ML service and
-    falls back automatically. Every prediction carries its `source`.
-  * Every prediction is logged (`[PREDICT] ... [ML]|[BASE]`) and surfaced on
+  `deliverer.ts`), **revised to ML-only (baseline removed)** — see the dated
+  entry below. The engine predicts every closed window through the model; when
+  no model is served it collects only.
+  * Every prediction is logged (`[PREDICT] ... [ML]`) and surfaced on
     `/health` (`predictionStats`, `predictor`). Accepted signals are delivered
     to Telegram when credentials are present.
   * Per-asset delivery cooldown (default 5 min) because a 6-asset
     every-minute cadence would otherwise send ~360 messages/hour.
-  * Verified live: 18 windows scored, ML and fallback both exercised (6 `[ML]`
-    then 12 `[BASE]` after the service was killed), Telegram 12 sent / 0 failed
-    / 4 throttled. The bot never stopped predicting through an ML outage.
 - **Inference wired into the deploy (one container) — 2026-10-16.** The Python
   model service is no longer a local-only extra. The root `Dockerfile` now
   installs Python + a venv with the inference deps, and `deploy/supervisord.conf`
@@ -258,12 +252,9 @@ counterpart to `deploy/supervisord.conf`.
   * `inference` — `uvicorn app:app` on `127.0.0.1:8000`
   * `retrain`   — `deploy/retrain-loop.sh`, re-running `train.py` on a schedule
   `INFERENCE_URL` is set to `http://127.0.0.1:8000` for the engine, so the
-  deployed bot scores `[ML]` as soon as a model exists — no manual step.
-  Verified by building the image and running it: supervisord brought all three
-  programs up, the engine connected live, `/health` reported
-  `ml+local-baseline-fallback`, the retrain loop trained a model from a seeded
-  dataset, the service auto-reloaded it, and predictions flipped from `[BASE]`
-  to `[ML]` with no restart.
+  deployed bot scores `[ML]` as soon as a model exists — no manual step. The
+  retrain loop attempts a train immediately on start, and `deploy/entrypoint.sh`
+  bootstrap-trains from an existing dataset before supervisord comes up.
 - **Dataset + model now persist across deploys.** `render.yaml` attaches a 1 GB
   disk at `/app/data`, and `SIGNALS_FILE` / `FEATURES_FILE` / `MODEL_FILE` point
   there. Without this, `autoDeploy: true` wiped every collected label on each
@@ -336,9 +327,8 @@ counterpart to `deploy/supervisord.conf`.
   overlap and folds, so the comparison stays like-for-like, but the effective
   sample size is well below 240.
 - **Still missing:** no LICENSE file; retraining is time-based, not triggered by
-  data growth. **The baseline remains a placeholder with no claimed edge. The
-  pipeline has one weak, unconfirmed hint of signal at a 180s horizon and
-  nothing more — validation is only as good as the data.**
+  data growth. **The pipeline has one weak, unconfirmed hint of signal at a 180s
+  horizon and nothing more — validation is only as good as the data.**
 - **The deployed model used to be fit on a subset of the data.** The retrain
   loop called `train.py` without `--walk-forward`, which takes the holdout
   branch and saves the model fit on `fit_idx` — 80% of `train_idx`, i.e. ~67% of
@@ -471,8 +461,9 @@ Service `Chamberfx-pocket-option` (`srv-dbacaftg1s2s73bivrt0`), owner
 - **Live verification (2026-10-18):** `connected: true`, 6 assets,
   `predictionStats.total` climbing, `telegram.sent` climbing at one message per
   minute with `failed: 0` and `throttled: 0`. A labeled test message reached the
-  target chat. ML is still `[BASE]` only — no model has been trained on the
-  deployed instance yet, so `/predict` answers 503 and the local baseline answers.
+  target chat. At that time no model had been trained on the deployed instance,
+  so `/predict` answered 503 and the local baseline answered; that fallback has
+  since been removed (see below).
 - **`SIGNAL_COOLDOWN_MS=0` on the deployed service.** At the 300000 default the
   live run showed `sent 4 / throttled 43`; at `0` it is one message per 60s
   window with zero throttling. Batching already caps delivery at 60 msgs/hour, so
@@ -512,3 +503,51 @@ ticks. No close event fires either, so nothing schedules a recovery.
 The tell to grep for in production logs is `No auth packet, subscribing
 directly` followed by a `ticks=` that stops increasing while `connected=true`.
 14 checks added to `price-bot/tests/run.ts` (109 → 123).
+
+### ML-only prediction: the baseline predictor was removed (2026-11-18)
+
+The engine now predicts **only** from the trained model. The deterministic
+`LocalPredictor` baseline is gone, and with it the `'local-baseline'` source and
+the `[BASE]` log tag.
+
+**Why.** A baseline that always answers keeps the pipeline "always predicting",
+but those predictions are a placeholder with no claimed edge. Every one of them
+had to clear the same confidence gate and the same AI analyst as a real model
+prediction, so a weak-but-confident baseline window could reach the chat looking
+exactly like a model signal. The requirement is that delivery is gated on the
+model, so the fallback is removed rather than merely down-weighted.
+
+**Behaviour now.**
+- `MlPredictor` is the only predictor; `PredictionRouter` forwards to it and
+  returns null when it cannot answer. A null means "no prediction for this
+  window" — never a fallback.
+- No model served (no `INFERENCE_URL`, service down, 503 untrained) ⇒
+  **COLLECT-ONLY**: the engine keeps building `signals.json` and `live-prices.json`
+  but emits no predictions, signals, or deliveries. `/health` still reports
+  `predictionStats` (which stay at zero) and `predictor: 'none'`.
+- The startup log states the mode: `active predictor: <name>` when the model is
+  reachable, or `COLLECT-ONLY mode` when it is not.
+
+**Setup/automation now guarantees a model.**
+- `run.sh` preflight trains one from an existing dataset if `model.pkl` is
+  missing, then `wait_for_model` blocks (bounded, 30s) until `/health` reports
+  `model_loaded: true` before capture starts. A timeout is not fatal — capture
+  starts anyway and the retrain loop's model is hot-reloaded.
+- `deploy/retrain-loop.sh` attempts a train immediately on start (previously it
+  slept a full interval first), so a fresh setup with data reaches ML-only
+  quickly instead of collecting blindly for up to 30 minutes.
+- `deploy/entrypoint.sh` bootstrap-trains in-container from the mounted dataset
+  before supervisord starts.
+- The retrain loop still runs on its interval; a model that appears later is
+  picked up by `MODEL_AUTO_RELOAD` and capture begins predicting without a
+  restart.
+
+**Trade-off.** This is deliberately fail-closed. If the model cannot be served,
+the bot is silent by design: no signal is better than an unverified one. The
+cost is that a broken inference path produces no Telegram traffic at all, which
+is the intended signal that something needs attention (see `/health` `predictor`
+and `inference` stats).
+
+Verified: `tsc` exit 0, 187/187 checks pass (the removed baseline tests are gone;
+new tests pin that a missing model yields null, never a fabricated prediction).
+

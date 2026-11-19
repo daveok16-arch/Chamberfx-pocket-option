@@ -33,7 +33,7 @@ import {
   type StrategyContext,
 } from './strategy.js';
 import { evaluateSignal, type ValidSignal } from './signalFilter.js';
-import { LocalPredictor, PredictionRouter } from './predictor.js';
+import { MlPredictor, PredictionRouter } from './predictor.js';
 import { TelegramDeliverer } from './deliverer.js';
 import { GeminiAnalyst, type AiAnalysis, type SignalAnalyst } from './aiAnalyst.js';
 import * as fs from 'fs';
@@ -138,17 +138,20 @@ async function main() {
     horizonMs: horizonSec * 1000,
   });
 
-  // --- Prediction: score EVERY window at the 60s bucket boundary -------
-  // A prediction bot must always predict. The ML service is preferred when
-  // INFERENCE_URL is set and a model is trained; otherwise the local baseline
-  // answers, so the bot never goes silent. Every prediction is emitted (logged
-  // and delivered); the Phase 3 filters additionally mark which ones cleared
-  // the confidence/volatility bar.
+  // --- Prediction: score EVERY closed window via the trained model ------
+  // The ONLY prediction source is the model served by the inference service.
+  // There is no baseline fallback: if INFERENCE_URL is unset, the service is
+  // down, or no model has been trained (503), the engine collects data and
+  // makes no predictions. Shipping a placeholder's guesses to a chat is worse
+  // than staying quiet, so this path is deliberately fail-closed.
   const inference = new InferenceClient();
-  const predictor = new PredictionRouter(
-    inference.isEnabled() ? inference : null,
-    new LocalPredictor()
-  );
+  const predictor = new PredictionRouter(inference.isEnabled() ? new MlPredictor(inference) : null);
+  if (!inference.isEnabled()) {
+    console.error(
+      '[PREDICT] no inference service configured — COLLECT-ONLY mode. ' +
+        'No predictions, signals or deliveries until a model is served.'
+    );
+  }
   console.log(`[PREDICT] active predictor: ${predictor.name}`);
 
   const predictions: Record<string, PredictionResult> = {};
@@ -156,8 +159,8 @@ async function main() {
   const validSignals: Record<string, ValidSignal> = {};
   /** Most recent AI verdict, per asset (approved signals only). */
   const aiApprovals: Record<string, AiAnalysis> = {};
-  /** Rolling counts for observability. */
-  const predictionStats = { total: 0, ml: 0, local: 0, accepted: 0, rejected: 0 };
+  /** Rolling counts for observability. `ml` counts model-sourced predictions. */
+  const predictionStats = { total: 0, ml: 0, accepted: 0, rejected: 0 };
   /** AI-gate counts: what the analyst did with the filter-accepted signals. */
   const aiStats = { analyzed: 0, approved: 0, rejected: 0, failed: 0 };
 
@@ -248,13 +251,11 @@ async function main() {
         if (!result) return;
         predictions[asset] = result;
         predictionStats.total++;
-        if (result.source === 'ml') predictionStats.ml++;
-        else predictionStats.local++;
+        predictionStats.ml++;
 
-        const tag = result.source === 'ml' ? 'ML' : 'BASE';
         console.log(
           `[PREDICT] ${asset} P(UP)=${result.probability.toFixed(4)} ` +
-            `-> ${result.direction === 1 ? 'UP(1)' : 'DOWN(0)'} [${tag}]`
+            `-> ${result.direction === 1 ? 'UP(1)' : 'DOWN(0)'} [ML]`
         );
 
         // Phase 3: gate the raw prediction. A rejection is normal operation,
@@ -328,8 +329,7 @@ async function main() {
     const d = deliverer.getStats();
     console.log(
       `[COLLECT] labels=${s.labels} pending=${s.pending} assets=${s.assets} skipped=${s.skipped}` +
-        ` | predictions total=${predictionStats.total}` +
-        ` ml=${predictionStats.ml} base=${predictionStats.local}` +
+        ` | predictions total=${predictionStats.total} ml=${predictionStats.ml}` +
         ` | signals accepted=${predictionStats.accepted} rejected=${predictionStats.rejected}` +
         ` | ai analyzed=${aiStats.analyzed} approved=${aiStats.approved}` +
         ` rejected=${aiStats.rejected} failed=${aiStats.failed}` +
@@ -421,8 +421,7 @@ async function main() {
       console.log(`[COLLECT] final: labels=${s.labels} pending=${s.pending} assets=${s.assets}`);
       console.log(
         `[PREDICT] final: total=${predictionStats.total} ml=${predictionStats.ml} ` +
-          `base=${predictionStats.local} accepted=${predictionStats.accepted} ` +
-          `rejected=${predictionStats.rejected}`
+          `accepted=${predictionStats.accepted} rejected=${predictionStats.rejected}`
       );
       console.log(
         `[AI] final: analyzed=${aiStats.analyzed} approved=${aiStats.approved} ` +

@@ -161,10 +161,11 @@ export interface PredictionResult {
   /** Decision threshold the service applied. */
   threshold: number;
   /**
-   * Which predictor produced this: the ML service or the local baseline
-   * fallback. Absent on raw `/predict` responses; set by the prediction layer.
+   * Which predictor produced this. Only the ML service can produce a
+   * prediction, so this is always `'ml'` when set; absent on raw `/predict`
+   * responses until the prediction layer tags them.
    */
-  source?: 'ml' | 'local-baseline';
+  source?: 'ml';
 }
 
 /**
@@ -190,7 +191,11 @@ export class InferenceClient implements Predictor {
     if (this.enabled) {
       console.log(`[INFER] ML inference enabled -> ${this.url}`);
     } else {
-      console.log('[INFER] INFERENCE_URL unset — using local baseline predictor');
+      console.error(
+        '[INFER] INFERENCE_URL is unset — no model can be reached, so NO predictions ' +
+          'will be made. The engine will collect data only. Set INFERENCE_URL to the ' +
+          'inference service (see run.sh / deploy/supervisord.conf).'
+      );
     }
   }
 

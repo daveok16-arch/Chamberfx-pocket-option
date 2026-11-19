@@ -1,23 +1,20 @@
 /**
- * Predictor Layer — always-on direction prediction
- * ================================================
- * A prediction bot must predict on every window, not only once a trained model
- * happens to exist. This module provides two interchangeable predictors behind
- * one interface, plus a router that prefers the ML model and falls back to a
- * deterministic baseline:
+ * Predictor Layer — ML-only direction prediction
+ * ==============================================
+ * Predictions come from exactly one source: the trained model served by the
+ * Python inference service (`inference/app.py`). There is no deterministic
+ * baseline fallback. A bot that ships a placeholder's guesses to a chat is
+ * worse than a bot that stays quiet, so when no model is served the pipeline
+ * collects data and predicts nothing.
  *
- *   - `LocalPredictor`  — no dependencies, no training, always answers. It is a
- *     transparent baseline (trend + momentum + tick-imbalance, scaled by the
- *     window's own realised volatility). It exists so the bot is continuously
- *     predicting while the dataset grows.
- *   - `PredictionRouter` — tries the Python ML service first; if it is disabled
- *     or returns no model (503), the local baseline answers instead. The source
- *     of every prediction is reported, so an ML answer is never confused with a
- *     baseline one.
+ *   - `MlPredictor` — the only predictor. It scores a feature window through
+ *     `InferenceClient`; a null answer means "no model", never "guess".
+ *   - `PredictionRouter` — the seam between the collector and the predictor.
+ *     It forwards to the ML predictor and returns null when the model cannot
+ *     answer, so the caller simply skips the window.
  *
- * The local baseline is NOT claimed to be profitable. It is a placeholder that
- * keeps the pipeline honest and observable; the ML model supersedes it
- * automatically once one is trained and served.
+ * `source` on every result is always `'ml'`, so downstream code can assert
+ * that nothing but the model ever produced a signal.
  */
 
 import type { FeatureWindow, PredictionResult } from './strategy.js';
@@ -28,98 +25,51 @@ export interface Predictor {
   readonly name: string;
   /**
    * Score one window. Implementations must never throw and never return NaN.
-   * @returns the prediction, or null when this predictor cannot answer.
+   * @returns the prediction, or null when this predictor cannot answer (e.g.
+   *          no model is being served). A null is never a fallback trigger —
+   *          the pipeline treats it as "no prediction for this window".
    */
   predict(asset: string, features: FeatureWindow): Promise<PredictionResult | null>;
 }
 
-/** Floor on the volatility scale, so a dead-flat window cannot divide by zero. */
-const MIN_VOL_SCALE = 1e-6;
-
 /**
- * Deterministic baseline predictor.
+ * The ML predictor. Wraps whatever scores a window via the inference service
+ * and tags every result as `'ml'`, so the source is unambiguous downstream.
  *
- * Blends three signals already present in the feature window, each normalised
- * by the window's own volatility so the same weights work across assets with
- * very different price scales (EURUSD ~1.13 vs XAUUSD ~4173):
- *
- *   - trend      : `netChangePct / volScale`  — direction over the window
- *   - momentum   : `recentMomentumPct / volScale` — direction over the recent half
- *   - imbalance  : `(upRatio - 0.5) * 2` — share of directional ticks that ticked up
- *
- * The blended score is squashed through a logistic. The output is clamped away
- * from 0 and 1 because a placeholder has no business claiming certainty — that
- * would sail straight through the confidence filter on no evidence.
+ * A null from the underlying scorer (service down, 503 no model, timeout,
+ * malformed body) propagates as null: the window is not predicted. This is the
+ * fail-closed behaviour — no model, no signal.
  */
-export class LocalPredictor implements Predictor {
-  readonly name = 'local-baseline';
+export class MlPredictor implements Predictor {
+  readonly name: string;
 
-  /** Logistic steepness. Higher = more confident outputs. */
-  private readonly sensitivity: number;
-
-  constructor(opts: { sensitivity?: number } = {}) {
-    this.sensitivity = opts.sensitivity ?? 1.5;
+  constructor(private readonly ml: Predictor) {
+    this.name = ml.name;
   }
 
-  async predict(asset: string, features: FeatureWindow): Promise<PredictionResult> {
-    const open = features.open;
-    const volScale =
-      Number.isFinite(features.stdDev) && open > 0
-        ? Math.max(features.stdDev / open, MIN_VOL_SCALE)
-        : MIN_VOL_SCALE;
-
-    const trend =
-      Number.isFinite(features.netChangePct) ? features.netChangePct / volScale : 0;
-    // Already a scale-free percentage (like netChangePct), so it is divided by
-    // volScale only. Dividing by `open` as well would re-inject the raw price
-    // level and undo the scale-free property the features are built around.
-    const momentum =
-      Number.isFinite(features.recentMomentumPct)
-        ? features.recentMomentumPct / volScale
-        : 0;
-    const imbalance =
-      (Number.isFinite(features.upRatio) ? features.upRatio : 0.5) - 0.5;
-
-    const score = 0.6 * Math.tanh(trend) + 0.4 * Math.tanh(momentum) + 1.6 * imbalance;
-    let probability = 1 / (1 + Math.exp(-this.sensitivity * score));
-    if (!Number.isFinite(probability)) probability = 0.5;
-    probability = Math.min(Math.max(probability, 0.02), 0.98);
-
-    return {
-      asset,
-      probability,
-      // `>= threshold` matches the ML service's convention (app.py), so a
-      // tie at 0.5 resolves the same way on both paths.
-      direction: probability >= 0.5 ? 1 : 0,
-      threshold: 0.5,
-      source: 'local-baseline',
-    };
+  async predict(asset: string, features: FeatureWindow): Promise<PredictionResult | null> {
+    const result = await this.ml.predict(asset, features);
+    if (!result) return null;
+    return { ...result, source: 'ml' };
   }
 }
 
 /**
- * Prefers the ML service, falls back to the local baseline.
+ * Routes a window to the ML predictor.
  *
- * The fallback is what keeps the bot predicting continuously: `INFERENCE_URL`
- * may be unset, the service may be down, or no model may be trained yet (503).
- * In every one of those cases the baseline answers instead of the bot going
- * silent. `source` on each result records which predictor actually answered.
+ * There is no fallback: a null answer is final and means the window is not
+ * predicted. The class exists so the collector depends on a stable interface
+ * and the ML-only policy is expressed in one place.
  */
 export class PredictionRouter implements Predictor {
   readonly name: string;
 
-  constructor(
-    private readonly ml: Predictor | null,
-    private readonly local: Predictor
-  ) {
-    this.name = ml ? `ml+${local.name}-fallback` : local.name;
+  constructor(private readonly ml: Predictor | null) {
+    this.name = ml ? ml.name : 'none';
   }
 
   async predict(asset: string, features: FeatureWindow): Promise<PredictionResult | null> {
-    if (this.ml) {
-      const fromMl = await this.ml.predict(asset, features);
-      if (fromMl) return fromMl;
-    }
-    return this.local.predict(asset, features);
+    if (!this.ml) return null;
+    return this.ml.predict(asset, features);
   }
 }

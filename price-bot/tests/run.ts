@@ -23,7 +23,7 @@ import {
   NO_TRADE_ZONE_HIGH,
 } from '../signalFilter.js';
 import type { FeatureWindow, PredictionResult } from '../strategy.js';
-import { LocalPredictor, PredictionRouter, type Predictor } from '../predictor.js';
+import { MlPredictor, PredictionRouter, type Predictor } from '../predictor.js';
 import {
   TelegramDeliverer,
   DEFAULT_COOLDOWN_MS,
@@ -403,70 +403,44 @@ section('features — upRatio ignores FLAT ticks; momentum is not a duplicate');
 }
 
 // ============================================================
-section('predictor — baseline always answers, router falls back');
+section('predictor — ML-only, no baseline fallback');
 // ============================================================
 {
-  const local = new LocalPredictor();
+  // The router with no ML predictor must NOT invent a prediction. A missing
+  // model means "no prediction", never a guess.
+  const none = new PredictionRouter(null);
+  const r0 = await none.predict('EURUSD_otc', feat());
+  check('router without an ML predictor returns null', r0 === null);
+  check('router names the no-predictor mode', none.name === 'none');
 
-  // Flat window -> no signal -> a coin flip, never a confident claim.
-  const flat = await local.predict('EURUSD_otc', feat());
-  check('flat window yields ~0.5', Math.abs(flat.probability - 0.5) < 1e-6);
-  check('flat window direction is 1 (ML >= convention)', flat.direction === 1);
-  check('baseline tags itself as the source', flat.source === 'local-baseline');
-  check('baseline always returns a result', flat !== null);
-
-  // Rising window -> UP.
-  const up = await local.predict('EURUSD_otc', feat({
-    open: 1.15, close: 1.1510, netChangePct: 0.00087,
-    recentMomentumPct: 0.0009, upRatio: 0.9, stdDev: 1e-5,
-  }));
-  check('rising window predicts UP', up.probability > 0.5 && up.direction === 1);
-
-  // Falling window -> DOWN.
-  const down = await local.predict('EURUSD_otc', feat({
-    open: 1.15, close: 1.1490, netChangePct: -0.00087,
-    recentMomentumPct: -0.0009, upRatio: 0.1, stdDev: 1e-5,
-  }));
-  check('falling window predicts DOWN', down.probability < 0.5 && down.direction === 0);
-
-  // Extremes must stay inside [0.02, 0.98] — a placeholder has no certainty.
-  const extreme = await local.predict('EURUSD_otc', feat({
-    open: 1.15, close: 1.30, netChangePct: 0.5, recentMomentumPct: 0.5,
-    upRatio: 1.0, stdDev: 1e-9,
-  }));
-  check('probability clamped <= 0.98', extreme.probability <= 0.98);
-  check('probability clamped >= 0.02', extreme.probability >= 0.02);
-
-  // Degenerate inputs must not produce NaN.
-  const nan = await local.predict('EURUSD_otc', feat({
-    open: 0, stdDev: 0, netChangePct: NaN, recentMomentumPct: NaN, upRatio: NaN,
-  }));
-  check('degenerate window yields finite probability', Number.isFinite(nan.probability));
-  check('degenerate window stays in range', nan.probability >= 0.02 && nan.probability <= 0.98);
-
-  // Router with no ML client -> baseline answers.
-  const noMl = new PredictionRouter(null, local);
-  const r1 = await noMl.predict('EURUSD_otc', feat());
-  check('router without ML falls back to baseline', r1 !== null);
-  check('router names the baseline-only mode', noMl.name === 'local-baseline');
-
-  // Router with a healthy ML client -> ML wins, and is tagged as such.
+  // A healthy ML predictor is the only source, and is tagged 'ml'.
   const fakeMl: Predictor = {
     name: 'fake-ml',
     async predict(asset: string) {
-      return { asset, probability: 0.91, direction: 1 as const, threshold: 0.5, source: 'ml' as const };
+      return { asset, probability: 0.91, direction: 1 as const, threshold: 0.5 };
     },
   };
-  const withMl = new PredictionRouter(fakeMl, local);
-  const r2 = await withMl.predict('EURUSD_otc', feat());
-  check('router prefers ML when it answers', r2 !== null && r2.source === 'ml');
-  check('router reports ML probability', r2 !== null && Math.abs(r2.probability - 0.91) < 1e-9);
+  const ml = new MlPredictor(fakeMl);
+  check('MlPredictor names itself after the wrapped predictor', ml.name === 'fake-ml');
 
-  // Router with a failing ML client -> falls back instead of going silent.
+  const r1 = await ml.predict('EURUSD_otc', feat());
+  check('MlPredictor returns the model probability', r1 !== null && Math.abs(r1.probability - 0.91) < 1e-9);
+  check('MlPredictor tags the source as ml', r1 !== null && r1.source === 'ml');
+
+  // A failing model (service down, 503 no model) propagates null — never a
+  // fabricated fallback.
   const deadMl: Predictor = { name: 'dead', async predict() { return null; } };
-  const fallback = new PredictionRouter(deadMl, local);
-  const r3 = await fallback.predict('EURUSD_otc', feat());
-  check('router falls back when ML returns null', r3 !== null && r3.source === 'local-baseline');
+  const dead = new MlPredictor(deadMl);
+  const r2 = await dead.predict('EURUSD_otc', feat());
+  check('MlPredictor returns null when the model cannot answer', r2 === null);
+
+  const withMl = new PredictionRouter(ml);
+  const r3 = await withMl.predict('EURUSD_otc', feat());
+  check('router forwards to the ML predictor', r3 !== null && r3.source === 'ml');
+
+  const withDead = new PredictionRouter(dead);
+  const r4 = await withDead.predict('EURUSD_otc', feat());
+  check('router returns null when the model is unavailable (no fallback)', r4 === null);
 }
 
 // ============================================================
@@ -479,7 +453,7 @@ section('deliverer — throttle policy and message formatting');
   const disabled = new TelegramDeliverer({ quiet: true });
   check('deliverer disabled without credentials', disabled.isEnabled() === false);
   const sig: any = { timestamp: 1_000_000, asset: 'EURUSD_otc', direction: 'CALL', confidence: 0.8 };
-  await disabled.send(sig, feat(), 'local-baseline', analysis());
+  await disabled.send(sig, feat(), 'ml', analysis());
   check('disabled deliverer sends nothing', disabled.getStats().sent === 0);
   check('disabled deliverer counts no throttle', disabled.getStats().throttled === 0);
   check('default cooldown is 5 minutes', DEFAULT_COOLDOWN_MS === 300_000);
@@ -512,7 +486,7 @@ section('deliverer — throttle policy and message formatting');
   const callText = TelegramDeliverer.format({
     signal: { timestamp: 1, asset: 'EURUSD_otc', direction: 'CALL', confidence: 0.9 },
     features: feat(),
-    source: 'local-baseline',
+    source: 'ml',
     analysis: analysis(),
   });
   check('CALL message shows P(UP) = confidence', callText.includes('0.900'));
@@ -553,7 +527,7 @@ section('deliverer — batching a bucket into one message');
 
   const mixed = TelegramDeliverer.formatBatch([
     { ...items[0], source: 'ml' },
-    { ...items[1], source: 'local-baseline' },
+    { ...items[1], source: 'ml-experimental' },
   ]);
   check('mixed sources are labelled as such', mixed.includes('source: mixed'));
 

@@ -3,9 +3,9 @@
  * ===========================================================================
  * This module is a *filter*, not a predictor. It receives the original
  * prediction produced by the project's prediction engine (`predictor.ts` ->
- * `PredictionRouter` -> the ML service in `inference/app.py`, with the local
- * baseline as fallback) together with the feature window it was scored from,
- * and asks a language model to independently judge it.
+ * `PredictionRouter` -> the ML service in `inference/app.py`) together with the
+ * feature window it was scored from, and asks a language model to independently
+ * judge it.
  *
  * Hard rules encoded here:
  *   - The analyst never invents a prediction. The prompt forbids it, and the
