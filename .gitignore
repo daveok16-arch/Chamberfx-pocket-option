@@ -8,6 +8,8 @@ dist/
 live-prices.json
 signals.json
 prices.json
+ai-journal.jsonl
+telegram-audit.jsonl
 
 # Archived datasets (pre-schema-fix). Kept locally for reference only; never
 # committed, and must never be mixed with current-schema data.

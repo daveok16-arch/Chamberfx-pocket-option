@@ -24,7 +24,18 @@ import {
 } from '../signalFilter.js';
 import type { FeatureWindow, PredictionResult } from '../strategy.js';
 import { LocalPredictor, PredictionRouter, type Predictor } from '../predictor.js';
-import { TelegramDeliverer, DEFAULT_COOLDOWN_MS } from '../deliverer.js';
+import {
+  TelegramDeliverer,
+  DEFAULT_COOLDOWN_MS,
+  DEFAULT_MAX_SEND_ATTEMPTS,
+} from '../deliverer.js';
+import {
+  GeminiAnalyst,
+  parseAnalysis,
+  buildPrompt,
+  DEFAULT_MIN_AI_CONFIDENCE,
+  type AiAnalysis,
+} from '../aiAnalyst.js';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -65,6 +76,22 @@ function pred(probability: number, direction: 0 | 1): PredictionResult {
   return { asset: 'EURUSD_otc', probability, direction, threshold: 0.5 };
 }
 
+/** Minimal AI analysis fixture for delivery tests. */
+function analysis(over: Partial<AiAnalysis> = {}): AiAnalysis {
+  return {
+    verdict: 'APPROVE',
+    confidence: 0.8,
+    summary: 'Momentum and tick imbalance agree with the called direction.',
+    supportingFactors: ['net change and up-ratio agree'],
+    risks: ['short window'],
+    conflicts: [],
+    model: 'test-model',
+    latencyMs: 100,
+    attempts: 1,
+    ...over,
+  };
+}
+
 // ============================================================
 section('signalFilter — confidence semantics and boundaries');
 // ============================================================
@@ -103,6 +130,15 @@ section('signalFilter — direction mapping and precedence');
   check('volatile window -> UNSTABLE_VOLATILITY', vol.accepted === false && vol.reason === 'UNSTABLE_VOLATILITY');
   const low = evaluateSignal(pred(0.5, 1), feat({ open: 1, range: 0.5 }));
   check('low confidence reported before volatility', low.accepted === false && low.reason === 'LOW_CONFIDENCE');
+
+  // The signal timestamp is the window's arm instant, so it matches the
+  // collector's label key exactly. Using the last tick instead lets a tick that
+  // lags the boundary by a few ms floor into the PREVIOUS bucket, colliding two
+  // distinct windows under one dedup key.
+  const stamped = evaluateSignal(pred(0.9, 1), feat({ open: 1, range: 0.001, lastTickAt: 1000 }), 2000);
+  check('signal timestamp is the window arm instant', stamped.accepted === true && stamped.signal.timestamp === 2000);
+  const fallback = evaluateSignal(pred(0.9, 1), feat({ open: 1, range: 0.001, lastTickAt: 1000 }));
+  check('signal timestamp falls back to lastTickAt', fallback.accepted === true && fallback.signal.timestamp === 1000);
 }
 
 // ============================================================
@@ -208,7 +244,18 @@ section('collector — windowing, bucket dedup, horizon resolution');
   const n1 = c1.getLabels().length;
   check('collector arms >= 2 labels over 3 min', n1 >= 2);
   check('at most one arm per 60s bucket', r1.boundaries.length <= 4);
-  check('every label horizon is >= 60s', c1.getLabels().every((l) => l.resolvedAt - l.entryAt >= 60000));
+  // The horizon is the *intended* one on every row, not the tick-arrival gap.
+  // A stall must not stretch 60s into 74s or mislabel against a stale price.
+  check(
+    'every label horizon is exactly 60s',
+    c1.getLabels().every((l) => l.resolvedAt - l.entryAt === 60000)
+  );
+  // The outcome is read off the tick at the horizon, not the live price at
+  // notice time: with 1s ticks the nearest tick to entryAt+60s is within 1s.
+  check(
+    'expiration price is taken at the horizon instant',
+    c1.getLabels().every((l) => l.resolvedAt === l.entryAt + 60000)
+  );
   {
     const buckets = c1.getLabels().map((l) => Math.floor(l.entryAt / 60000));
     check('label buckets unique', new Set(buckets).size === buckets.length);
@@ -233,6 +280,37 @@ section('collector — windowing, bucket dedup, horizon resolution');
   const covered = c2.getLabels().length;
   drive(c2, 3, BASE);
   check('no re-arm of already-labelled buckets', c2.getLabels().length === covered);
+
+  // A feed stall: the server clock freezes on the last tick, then jumps when
+  // ticks resume. Before the fix, a label whose horizon fell inside the gap was
+  // resolved against the late `now` and the live price, stretching the horizon
+  // (observed 60s -> 74s live) and reading the outcome off a stale price.
+  {
+    const stallAsset = 'STALL_otc';
+    const stall = new FeatureLabelCollector({ signalsFile: sig, featuresFile: featFile });
+    const history: Tick[] = [];
+    let px = 1.2;
+    let serverMs = BASE;
+    const step = (gapMs: number) => {
+      serverMs += gapMs;
+      px += 1e-5;
+      history.push({ assetId: stallAsset, price: px, timestamp: serverMs, direction: 'UP' });
+      stall.evaluate(
+        { price: px, candles: [], ticks: history.slice(-1000), serverTime: serverMs },
+        stallAsset
+      );
+    };
+    // Warm up a full window, arm a bucket, then stall for 20s before resuming.
+    for (let s = 0; s < 70; s++) step(1000);
+    const armed = stall.getLabels().length;
+    for (let s = 0; s < 5; s++) step(20_000); // 100s of server-clock jump
+    const rows = stall.getLabels();
+    check('stall still produces labels', rows.length > armed);
+    check(
+      'stalled labels keep the exact 60s horizon',
+      rows.every((l) => l.resolvedAt - l.entryAt === 60000)
+    );
+  }
 
   // Cap enforcement.
   const many = Array.from({ length: 50 }, (_, i) => ({
@@ -401,27 +479,42 @@ section('deliverer — throttle policy and message formatting');
   const disabled = new TelegramDeliverer({ quiet: true });
   check('deliverer disabled without credentials', disabled.isEnabled() === false);
   const sig: any = { timestamp: 1_000_000, asset: 'EURUSD_otc', direction: 'CALL', confidence: 0.8 };
-  await disabled.send(sig, feat(), 'local-baseline');
+  await disabled.send(sig, feat(), 'local-baseline', analysis());
   check('disabled deliverer sends nothing', disabled.getStats().sent === 0);
   check('disabled deliverer counts no throttle', disabled.getStats().throttled === 0);
   check('default cooldown is 5 minutes', DEFAULT_COOLDOWN_MS === 300_000);
+  check('default send attempts is 3', DEFAULT_MAX_SEND_ATTEMPTS === 3);
 
-  // Formatting is pure, so it can be checked directly.
-  const text = TelegramDeliverer.format(
-    { timestamp: 1, asset: 'EURUSD_otc', direction: 'PUT', confidence: 0.9 },
-    feat({ close: 1.1505, windowSpanSec: 59, tickCount: 110 }),
-    'ml'
-  );
+  // Formatting is pure, so it can be checked directly. The message must carry
+  // the ORIGINAL prediction AND the AI analysis, side by side.
+  const text = TelegramDeliverer.format({
+    signal: { timestamp: 1, asset: 'EURUSD_otc', direction: 'PUT', confidence: 0.9 },
+    features: feat({ close: 1.1505, windowSpanSec: 59, tickCount: 110 }),
+    source: 'ml',
+    analysis: analysis({
+      summary: 'Bearish structure with a supportive tick imbalance.',
+      supportingFactors: ['net change negative', 'momentum negative'],
+      risks: ['thin liquidity'],
+      conflicts: ['up-ratio mildly positive'],
+    }),
+  });
   check('message names the asset and direction', text.includes('PUT') && text.includes('EURUSD_otc'));
   check('message reports confidence as a percent', text.includes('90.0%'));
   check('PUT message shows P(UP) = 1 - confidence', text.includes('0.100'));
   check('message carries the source', text.includes('source: ml'));
+  check('message is marked AI-approved', text.includes('AI-APPROVED'));
+  check('message includes the AI summary', text.includes('Bearish structure'));
+  check('message lists supporting factors', text.includes('net change negative'));
+  check('message lists risk warnings', text.includes('thin liquidity'));
+  check('message lists conflicting indicators', text.includes('up-ratio mildly positive'));
+  check('message shows the analyst confidence', text.includes('80% confident'));
 
-  const callText = TelegramDeliverer.format(
-    { timestamp: 1, asset: 'EURUSD_otc', direction: 'CALL', confidence: 0.9 },
-    feat(),
-    'local-baseline'
-  );
+  const callText = TelegramDeliverer.format({
+    signal: { timestamp: 1, asset: 'EURUSD_otc', direction: 'CALL', confidence: 0.9 },
+    features: feat(),
+    source: 'local-baseline',
+    analysis: analysis(),
+  });
   check('CALL message shows P(UP) = confidence', callText.includes('0.900'));
 }
 
@@ -442,20 +535,21 @@ section('deliverer — batching a bucket into one message');
       },
       features: feat({ close: 1.1 + i * 0.01, windowSpanSec: 59 }),
       source: 'ml',
+      analysis: analysis({ summary: `analysis for ${asset}` }),
     })
   );
 
   const batch = TelegramDeliverer.formatBatch(items);
-  check('batch header counts every signal', batch.includes('6 signals'));
-  check('batch is one message, not six', batch.split('\n\n').length === 3);
+  check('batch header counts every signal', batch.includes('6 AI-APPROVED SIGNAL'));
   for (const it of items) {
     check(`batch lists ${it.signal.asset}`, batch.includes(it.signal.asset));
   }
   check('batch names every direction', batch.includes('CALL') && batch.includes('PUT'));
   // Strongest signal first, so the most actionable line is at the top.
-  const lines = batch.split('\n\n')[1].split('\n');
-  check('batch is sorted by confidence desc', lines[0].includes('XAUUSD_otc'));
+  const bodyBlock = batch.split('\n\n')[1].split('\n');
+  check('batch is sorted by confidence desc', bodyBlock[0].includes('XAUUSD_otc'));
   check('batch states a single shared source', batch.includes('source: ml'));
+  check('batch carries per-signal AI summaries', batch.includes('analysis for EURUSD_otc'));
 
   const mixed = TelegramDeliverer.formatBatch([
     { ...items[0], source: 'ml' },
@@ -464,7 +558,7 @@ section('deliverer — batching a bucket into one message');
   check('mixed sources are labelled as such', mixed.includes('source: mixed'));
 
   const single = TelegramDeliverer.formatBatch([items[0]]);
-  check('a one-signal batch reads singular', single.includes('1 signal ') && !single.includes('1 signals'));
+  check('a one-signal batch reads singular', single.includes('1 AI-APPROVED SIGNAL ') && !single.includes('SIGNALS'));
 }
 
 // ============================================================
@@ -483,15 +577,15 @@ section('deliverer — batch window drains to a single send');
   };
 
   const d = new TelegramDeliverer({ quiet: true, batchWindowMs: 50, cooldownMs: 0 });
-  const sig = (asset: string) => ({
-    timestamp: 1_792_000_000_000,
+  const sig = (asset: string, direction: 'CALL' | 'PUT' = 'CALL', timestamp = 1_792_000_000_000) => ({
+    timestamp,
     asset,
-    direction: 'CALL' as const,
+    direction,
     confidence: 0.7,
   });
   // Six signals enqueued together, as the bucket callback does.
   for (const a of ['A_otc', 'B_otc', 'C_otc', 'D_otc', 'E_otc', 'F_otc']) {
-    void d.send(sig(a), feat(), 'ml');
+    void d.send(sig(a), feat(), 'ml', analysis());
   }
   check('nothing is sent before the batch window closes', calls === 0);
 
@@ -503,28 +597,326 @@ section('deliverer — batch window drains to a single send');
   // A second bucket with the same assets inside the cooldown must be throttled.
   const d2 = new TelegramDeliverer({ quiet: true, batchWindowMs: 50, cooldownMs: 300_000 });
   calls = 0;
-  for (const a of ['A_otc', 'B_otc']) void d2.send(sig(a), feat(), 'ml');
+  for (const a of ['A_otc', 'B_otc']) void d2.send(sig(a), feat(), 'ml', analysis());
   await d2.flush();
   check('first bucket delivers', calls === 1);
   // 60s later, same assets: still inside the 5-minute cooldown.
   for (const a of ['A_otc', 'B_otc']) {
-    void d2.send({ ...sig(a), timestamp: 1_792_000_060_000 }, feat(), 'ml');
+    void d2.send({ ...sig(a), timestamp: 1_792_000_060_000 }, feat(), 'ml', analysis());
   }
   await d2.flush();
   check('cooldown suppresses the next bucket', calls === 1);
   check('suppressed signals are counted as throttled', d2.getStats().throttled === 2);
 
+  // Duplicate prevention: the SAME signal identity re-enqueued must be dropped
+  // even with the cooldown disabled, so a retry or a re-scored window cannot
+  // double-post.
+  const dDup = new TelegramDeliverer({ quiet: true, batchWindowMs: 0, cooldownMs: 0 });
+  calls = 0;
+  await dDup.send(sig('A_otc'), feat(), 'ml', analysis());
+  await dDup.send(sig('A_otc'), feat(), 'ml', analysis());
+  check('identical signal delivered once', calls === 1);
+  check('duplicate is counted', dDup.getStats().duplicates === 1);
+  // A different direction in the same bucket is a different signal.
+  await dDup.send(sig('A_otc', 'PUT'), feat(), 'ml', analysis());
+  check('opposite direction is not treated as a duplicate', calls === 2);
+
+  // Dedup keys must be pruned, or the map grows forever on a long run. A key
+  // older than the cooldown horizon can never match again, so it is dropped.
+  const dPrune = new TelegramDeliverer({ quiet: true, batchWindowMs: 0, cooldownMs: 60_000 });
+  const base = 1_700_000_000_000;
+  await dPrune.send(sig('A_otc', 'CALL', base), feat(), 'ml', analysis());
+  check('dedup map holds the delivered key', dPrune.getStats().dedupKeys === 1);
+  // Two hours later: the old key is far outside the cooldown horizon.
+  await dPrune.send(sig('B_otc', 'CALL', base + 7_200_000), feat(), 'ml', analysis());
+  check('stale dedup keys are pruned', dPrune.getStats().dedupKeys === 1);
+  check('pruning does not break new delivery', dPrune.getStats().sent === 2);
+  // Re-delivering the OLD bucket must no longer be suppressed by a stale key
+  // (its bucket is ancient; only the cooldown, now expired, ever covered it).
+  await dPrune.send(sig('A_otc', 'CALL', base + 14_400_000), feat(), 'ml', analysis());
+  check('fresh buckets deliver after pruning', dPrune.getStats().sent === 3);
+
+  // A next-bucket signal must not prune the key a LATE same-bucket duplicate
+  // still needs. This is a real live bug: with cooldown 0 the horizon was one
+  // bucket wide, so a signal arriving 3ms into the next bucket dropped the
+  // previous key, and a duplicate of the previous bucket then delivered twice
+  // (two AUDUSD PUT messages reached the chat).
+  {
+    // Bucket-aligned base, so +59_000 is genuinely the same bucket.
+    const b = 1_699_999_980_000;
+    const dLate = new TelegramDeliverer({ quiet: true, batchWindowMs: 0, cooldownMs: 0 });
+    calls = 0;
+    await dLate.send(sig('A_otc', 'PUT', b), feat(), 'ml', analysis());
+    // A signal from the NEXT bucket arrives almost immediately...
+    await dLate.send(sig('B_otc', 'PUT', b + 60_003), feat(), 'ml', analysis());
+    // ...then a late duplicate of the FIRST bucket arrives.
+    await dLate.send(sig('A_otc', 'PUT', b + 59_000), feat(), 'ml', analysis());
+    check('a late same-bucket duplicate is still suppressed', dLate.getStats().duplicates === 1);
+    check('the late duplicate is not delivered', calls === 2);
+  }
+
   // batchWindowMs = 0 restores one message per signal.
   const d3 = new TelegramDeliverer({ quiet: true, batchWindowMs: 0, cooldownMs: 0 });
   calls = 0;
-  await d3.send(sig('A_otc'), feat(), 'ml');
-  await d3.send(sig('B_otc'), feat(), 'ml');
+  await d3.send(sig('A_otc'), feat(), 'ml', analysis());
+  await d3.send(sig('B_otc'), feat(), 'ml', analysis());
   check('batchWindowMs=0 sends per signal', calls === 2);
   check('per-signal mode counts two messages', d3.getStats().sent === 2);
+
+  // Retry: a send that fails transiently must be retried, then succeed.
+  const dRetry = new TelegramDeliverer({
+    quiet: true,
+    batchWindowMs: 0,
+    cooldownMs: 0,
+    maxSendAttempts: 3,
+  });
+  let attempt = 0;
+  (globalThis as any).fetch = async () => {
+    attempt++;
+    if (attempt < 3) throw new Error('transient');
+    return { ok: true, status: 200 } as any;
+  };
+  await dRetry.send(sig('A_otc'), feat(), 'ml', analysis());
+  check('transient failure is retried until it succeeds', dRetry.getStats().sent === 1);
+  check('retries are counted', dRetry.getStats().retries === 2);
+
+  // The audit log must record the accepted message id and the exact text, so
+  // the delivered content is verifiable without reading the chat back.
+  {
+    const auditPath = path.join(os.tmpdir(), `tg-audit-${Date.now()}.jsonl`);
+    const dAudit = new TelegramDeliverer({
+      quiet: true,
+      batchWindowMs: 0,
+      cooldownMs: 0,
+      auditFile: auditPath,
+    });
+    (globalThis as any).fetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: { message_id: 4242 } }),
+    });
+    await dAudit.send(sig('A_otc'), feat(), 'ml', analysis());
+    check('message id is recorded from the Telegram response', dAudit.getStats().lastMessageId === 4242);
+    const logged = fs.readFileSync(auditPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    check('audit log has one record per sent message', logged.length === 1);
+    check('audit record carries the message id', logged[0].messageId === 4242);
+    check('audit record carries the exact sent text', logged[0].text.includes('AI-APPROVED'));
+    fs.rmSync(auditPath, { force: true });
+  }
+
+  // A permanent failure is counted, never thrown.
+  const dFail = new TelegramDeliverer({
+    quiet: true,
+    batchWindowMs: 0,
+    cooldownMs: 0,
+    maxSendAttempts: 2,
+  });
+  (globalThis as any).fetch = async () => {
+    throw new Error('permanent');
+  };
+  await dFail.send(sig('A_otc'), feat(), 'ml', analysis());
+  check('permanent failure counts as failed', dFail.getStats().failed === 1);
+  check('permanent failure sends nothing', dFail.getStats().sent === 0);
 
   (globalThis as any).fetch = savedFetch;
   delete process.env.TELEGRAM_BOT_TOKEN;
   delete process.env.TELEGRAM_CHAT_ID;
+}
+
+// ============================================================
+section('aiAnalyst — parse, guardrails, retries, fail-closed');
+// ============================================================
+{
+  const okOpts = { model: 'm', latencyMs: 1, attempts: 1, minConfidence: DEFAULT_MIN_AI_CONFIDENCE };
+
+  // Well-formed APPROVE.
+  const approve = parseAnalysis(
+    JSON.stringify({
+      verdict: 'APPROVE',
+      confidence: 0.82,
+      summary: 'Trend and tick imbalance agree.',
+      supporting_factors: ['net change up', 'up-ratio 0.7'],
+      risks: ['thin window'],
+      conflicts: [],
+    }),
+    okOpts
+  );
+  check('APPROVE parsed', approve?.verdict === 'APPROVE');
+  check('confidence parsed', approve?.confidence === 0.82);
+  check('supporting factors parsed', approve?.supportingFactors.length === 2);
+  check('risks parsed', approve?.risks[0] === 'thin window');
+  check('summary parsed', approve?.summary.startsWith('Trend and tick') === true);
+
+  // A fenced JSON block (models add one despite the instruction) still parses.
+  const fenced = parseAnalysis('```json\n{"verdict":"REJECT","confidence":0.3}\n```', okOpts);
+  check('fenced JSON parses', fenced?.verdict === 'REJECT');
+
+  // An unsure APPROVE is downgraded to REJECT by the layer's guardrail.
+  const unsure = parseAnalysis('{"verdict":"APPROVE","confidence":0.4}', okOpts);
+  check('low-confidence APPROVE downgraded to REJECT', unsure?.verdict === 'REJECT');
+  const sure = parseAnalysis('{"verdict":"APPROVE","confidence":0.9}', okOpts);
+  check('confident APPROVE stands', sure?.verdict === 'APPROVE');
+
+  // Malformed / missing-verdict payloads must never read as an approval.
+  check('no JSON -> null', parseAnalysis('the model rambled', okOpts) === null);
+  check('missing verdict -> null', parseAnalysis('{"confidence":0.9}', okOpts) === null);
+  check('bogus verdict -> null', parseAnalysis('{"verdict":"MAYBE"}', okOpts) === null);
+  check('invalid JSON body -> null', parseAnalysis('{not json}', okOpts) === null);
+  check('confidence clamped into [0,1]', parseAnalysis('{"verdict":"REJECT","confidence":9}', okOpts)?.confidence === 1);
+  check('non-string factors ignored', parseAnalysis('{"verdict":"REJECT","supporting_factors":[1,2]}', okOpts)?.supportingFactors.length === 0);
+
+  // The prompt must carry the ORIGINAL prediction so the analyst judges it
+  // rather than inventing one.
+  const prompt = buildPrompt({
+    signal: { timestamp: 1, asset: 'EURUSD_otc', direction: 'CALL', confidence: 0.8 },
+    prediction: { asset: 'EURUSD_otc', probability: 0.8, direction: 1, threshold: 0.5, source: 'ml' },
+    features: feat({ open: 1.1, close: 1.101, netChangePct: 0.0009, recentMomentumPct: 0.001, upRatio: 0.7 }),
+    marketContext: 'recent closes: 1.1, 1.101',
+  });
+  check('prompt states the asset', prompt.includes('EURUSD_otc'));
+  check('prompt states the predicted direction', prompt.includes('CALL'));
+  check('prompt states the prediction source', prompt.includes('ml'));
+  check('prompt includes the feature window', prompt.includes('upRatio') && prompt.includes('0.7000'));
+  check('prompt includes market context', prompt.includes('recent closes'));
+
+  // Disabled without a key: analyze() returns null (nothing delivered).
+  const savedKey = process.env.GEMINI_API_KEY;
+  const savedKey2 = process.env.Gemini_API_Token;
+  delete process.env.GEMINI_API_KEY;
+  delete process.env.Gemini_API_Token;
+  const off = new GeminiAnalyst({ quiet: true });
+  check('analyst disabled without an API key', off.isEnabled() === false);
+  const offResult = await off.analyze({
+    signal: { timestamp: 1, asset: 'EURUSD_otc', direction: 'CALL', confidence: 0.8 },
+    prediction: pred(0.8, 1),
+    features: feat(),
+  });
+  check('disabled analyst returns null (fail-closed)', offResult === null);
+
+  // Enabled, with a stubbed fetch that returns valid analysis JSON.
+  const req = {
+    signal: { timestamp: 1, asset: 'EURUSD_otc', direction: 'CALL' as const, confidence: 0.8 },
+    prediction: pred(0.8, 1),
+    features: feat(),
+  };
+  let calls = 0;
+  const stubFetch = (async () => {
+    calls++;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        candidates: [
+          { content: { parts: [{ text: '{"verdict":"APPROVE","confidence":0.77,"summary":"ok","supporting_factors":[],"risks":[],"conflicts":[]}' }] } },
+        ],
+      }),
+    } as any;
+  }) as unknown as typeof fetch;
+
+  const on = new GeminiAnalyst({ apiKey: 'k', fetchImpl: stubFetch, quiet: true, maxRetries: 2 });
+  check('analyst enabled with an API key', on.isEnabled() === true);
+  const res = await on.analyze(req);
+  check('analyst returns a verdict', res?.verdict === 'APPROVE');
+  check('analyst records the model', res?.model !== undefined);
+  check('analyst counts the analysis', on.getStats().analyzed === 1);
+  check('analyst counts the approval', on.getStats().approved === 1);
+  check('single successful call needs no retry', calls === 1);
+
+  // Transient failure then success: retried, and counted.
+  let n = 0;
+  const flakyFetch = (async () => {
+    n++;
+    if (n < 2) throw new Error('boom');
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: '{"verdict":"REJECT","confidence":0.9}' }] } }] }),
+    } as any;
+  }) as unknown as typeof fetch;
+  const flaky = new GeminiAnalyst({ apiKey: 'k', fetchImpl: flakyFetch, quiet: true, maxRetries: 2 });
+  const flakyRes = await flaky.analyze(req);
+  check('transient failure is retried to a verdict', flakyRes?.verdict === 'REJECT');
+  check('flaky analyst records the retry', flaky.getStats().retries === 1);
+
+  // Permanent failure: null after all attempts, counted as an error.
+  const deadFetch = (async () => {
+    throw new Error('down');
+  }) as unknown as typeof fetch;
+  const dead = new GeminiAnalyst({ apiKey: 'k', fetchImpl: deadFetch, quiet: true, maxRetries: 1 });
+  const deadRes = await dead.analyze(req);
+  check('permanent failure returns null (fail-closed)', deadRes === null);
+  check('permanent failure counted as error', dead.getStats().errors === 1);
+  check('failed analysis counts no approval', dead.getStats().approved === 0);
+
+  // A non-2xx response is a failure, not a silent approval.
+  const errFetch = (async () => ({ ok: false, status: 500, text: async () => 'server error' })) as unknown as typeof fetch;
+  const err = new GeminiAnalyst({ apiKey: 'k', fetchImpl: errFetch, quiet: true, maxRetries: 0 });
+  check('HTTP error -> null', (await err.analyze(req)) === null);
+
+  // A 401 (auth) is fatal: not worth retrying, and never an approval.
+  let authCalls = 0;
+  const authFetch = (async () => {
+    authCalls++;
+    return { ok: false, status: 401, text: async () => 'bad key' };
+  }) as unknown as typeof fetch;
+  const auth = new GeminiAnalyst({ apiKey: 'k', fetchImpl: authFetch, quiet: true, maxRetries: 2 });
+  check('401 -> null', (await auth.analyze(req)) === null);
+  check('401 is not retried', authCalls === 1);
+
+  // A 429 falls back to the next model instead of failing the signal.
+  const seen: string[] = [];
+  const rateLimitFetch = (async (url: any) => {
+    const model = String(url).split('/models/')[1]?.split(':')[0] ?? '';
+    seen.push(model);
+    if (seen.length === 1) {
+      return { ok: false, status: 429, text: async () => 'quota', headers: { get: () => null } };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: '{"verdict":"APPROVE","confidence":0.9}' }] } }] }),
+    } as any;
+  }) as unknown as typeof fetch;
+  const fb = new GeminiAnalyst({
+    apiKey: 'k',
+    fetchImpl: rateLimitFetch,
+    quiet: true,
+    maxRetries: 2,
+    minIntervalMs: 0,
+    model: 'primary-model',
+    models: ['primary-model', 'backup-model'],
+  });
+  const fbRes = await fb.analyze(req);
+  check('429 falls back to the next model', fbRes?.verdict === 'APPROVE');
+  check('fallback recorded on the result', fbRes?.model === 'backup-model');
+  check('fallback counter increments', fb.getStats().fallbacks === 1);
+  check('first attempt used the primary model', seen[0] === 'primary-model');
+
+  // Pacing: two analyses must not fire back-to-back.
+  const stamps: number[] = [];
+  const pacingFetch = (async () => {
+    stamps.push(Date.now());
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: '{"verdict":"REJECT","confidence":0.9}' }] } }] }),
+    } as any;
+  }) as unknown as typeof fetch;
+  const paced = new GeminiAnalyst({
+    apiKey: 'k',
+    fetchImpl: pacingFetch,
+    quiet: true,
+    maxRetries: 0,
+    minIntervalMs: 120,
+  });
+  const t0 = Date.now();
+  await Promise.all([paced.analyze(req), paced.analyze(req)]);
+  check('paced calls are serialised, not concurrent', stamps.length === 2);
+  check('pacing enforces the minimum gap', stamps[1] - stamps[0] >= 100);
+  check('pacing does not delay the first call', stamps[0] - t0 < 100);
+
+  if (savedKey !== undefined) process.env.GEMINI_API_KEY = savedKey;
+  if (savedKey2 !== undefined) process.env.Gemini_API_Token = savedKey2;
 }
 
 // ============================================================

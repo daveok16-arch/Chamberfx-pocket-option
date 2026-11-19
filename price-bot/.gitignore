@@ -6,6 +6,8 @@ dist/
 live-prices.json
 signals.json
 prices.json
+ai-journal.jsonl
+telegram-audit.jsonl
 
 # Python / ML
 __pycache__/

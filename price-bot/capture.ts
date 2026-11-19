@@ -35,7 +35,9 @@ import {
 import { evaluateSignal, type ValidSignal } from './signalFilter.js';
 import { LocalPredictor, PredictionRouter } from './predictor.js';
 import { TelegramDeliverer } from './deliverer.js';
+import { GeminiAnalyst, type AiAnalysis, type SignalAnalyst } from './aiAnalyst.js';
 import * as fs from 'fs';
+import * as path from 'path';
 import * as http from 'http';
 
 const DEFAULT_ASSETS = [
@@ -152,12 +154,93 @@ async function main() {
   const predictions: Record<string, PredictionResult> = {};
   /** Most recent signal that cleared every filter, per asset. */
   const validSignals: Record<string, ValidSignal> = {};
+  /** Most recent AI verdict, per asset (approved signals only). */
+  const aiApprovals: Record<string, AiAnalysis> = {};
   /** Rolling counts for observability. */
   const predictionStats = { total: 0, ml: 0, local: 0, accepted: 0, rejected: 0 };
+  /** AI-gate counts: what the analyst did with the filter-accepted signals. */
+  const aiStats = { analyzed: 0, approved: 0, rejected: 0, failed: 0 };
 
-  const deliverer = new TelegramDeliverer();
+  const deliverer = new TelegramDeliverer({
+    auditFile: process.env.TELEGRAM_AUDIT_FILE ?? path.join(path.dirname(signalsFile), 'telegram-audit.jsonl'),
+  });
+  const analyst: SignalAnalyst = new GeminiAnalyst();
 
-  collector.onBucketBoundary((asset: string, features: FeatureWindow) => {
+  // --- AI decision journal --------------------------------------------
+  // Append-only JSONL record of every AI verdict, so the gate can be audited
+  // independently of the rotating console log: what the prediction was, what
+  // the analyst decided, and whether the signal was delivered. Kept in the
+  // data directory next to signals.json so it survives a restart alongside the
+  // dataset. It records decisions; it is not a second source of predictions.
+  const journalFile =
+    process.env.AI_JOURNAL_FILE ?? path.join(path.dirname(signalsFile), 'ai-journal.jsonl');
+  const journal = (entry: Record<string, unknown>) => {
+    try {
+      fs.appendFileSync(journalFile, JSON.stringify(entry) + '\n');
+    } catch (e) {
+      console.error(`[AI] journal write failed: ${(e as Error).message}`);
+    }
+  };
+
+  /**
+   * Route a filter-accepted signal through the AI analyst, then deliver it.
+   *
+   * This is the ONLY path to Telegram. Ordering is deliberate:
+   *   1. the prediction engine's signal is captured intact,
+   *   2. the analyst independently judges it,
+   *   3. only an APPROVE is delivered — with the analysis attached.
+   *
+   * A failed analysis is fail-closed: the signal is dropped, never delivered
+   * unverified. The original prediction object is passed by value and never
+   * mutated, so the source data is preserved exactly.
+   */
+  const analyzeAndDeliver = async (
+    signal: ValidSignal,
+    features: FeatureWindow,
+    prediction: PredictionResult,
+    context: string
+  ) => {
+    aiStats.analyzed++;
+    const analysis = await analyst.analyze({ signal, prediction, features, marketContext: context });
+
+    // The prediction object is journaled as received, never rewritten, so the
+    // original source prediction can always be compared against the verdict.
+    const base = {
+      at: new Date().toISOString(),
+      signal,
+      prediction,
+    };
+
+    if (!analysis) {
+      aiStats.failed++;
+      console.error(`[AI] ${signal.asset} — analysis unavailable; signal withheld`);
+      journal({ ...base, delivered: false, reason: 'analysis-unavailable' });
+      return;
+    }
+
+    if (analysis.verdict !== 'APPROVE') {
+      aiStats.rejected++;
+      console.log(
+        `[AI_REJECT] ${signal.asset} ${signal.direction} ` +
+          `(AI ${(analysis.confidence * 100).toFixed(0)}%): ${analysis.summary}`
+      );
+      journal({ ...base, analysis, delivered: false, reason: 'ai-rejected' });
+      return;
+    }
+
+    aiStats.approved++;
+    aiApprovals[signal.asset] = analysis;
+    console.log(
+      `[AI_APPROVE] ${signal.asset} ${signal.direction} ` +
+        `(AI ${(analysis.confidence * 100).toFixed(0)}%): ${analysis.summary}`
+    );
+    void deliverer.send(signal, features, prediction.source ?? 'unknown', analysis);
+    // Delivery is queued and batched; the journal records the approval decision,
+    // and `[DELIVER] sent ... message #N` is the delivery confirmation.
+    journal({ ...base, analysis, delivered: true, reason: 'ai-approved' });
+  };
+
+  collector.onBucketBoundary((asset: string, features: FeatureWindow, _price: number, entryAt: number) => {
     // Fire-and-forget: scoring must not block the evaluate loop.
     void predictor
       .predict(asset, features)
@@ -176,7 +259,7 @@ async function main() {
 
         // Phase 3: gate the raw prediction. A rejection is normal operation,
         // not an error — it only means the window was not tradeable.
-        const outcome = evaluateSignal(result, features);
+        const outcome = evaluateSignal(result, features, entryAt);
         if (!outcome.accepted) {
           predictionStats.rejected++;
           console.log(`[SIGNAL_FILTER] Signal discarded: ${outcome.detail}`);
@@ -186,8 +269,16 @@ async function main() {
         predictionStats.accepted++;
         validSignals[asset] = outcome.signal;
         console.log(`[VALID_SIGNAL] ${JSON.stringify(outcome.signal)}`);
-        void deliverer.send(outcome.signal, features, result.source ?? 'unknown');
-      });
+
+        // AI analysis gate: nothing reaches Telegram without an APPROVE.
+        const context = `${asset} recent closes: ${bot
+          .getCandles(asset)
+          .slice(-5)
+          .map((c) => c.close)
+          .join(', ')}`;
+        return analyzeAndDeliver(outcome.signal, features, result, context);
+      })
+      .catch((e) => console.error(`[PREDICT] ${asset} pipeline error: ${(e as Error).message}`));
   });
 
   /**
@@ -240,8 +331,11 @@ async function main() {
         ` | predictions total=${predictionStats.total}` +
         ` ml=${predictionStats.ml} base=${predictionStats.local}` +
         ` | signals accepted=${predictionStats.accepted} rejected=${predictionStats.rejected}` +
+        ` | ai analyzed=${aiStats.analyzed} approved=${aiStats.approved}` +
+        ` rejected=${aiStats.rejected} failed=${aiStats.failed}` +
         (d.enabled
-          ? ` | telegram msgs=${d.sent} signals=${d.signals} failed=${d.failed} throttled=${d.throttled}`
+          ? ` | telegram msgs=${d.sent} signals=${d.signals} failed=${d.failed}` +
+            ` throttled=${d.throttled} dup=${d.duplicates} retries=${d.retries}`
           : '')
     );
   }, 15000);
@@ -267,6 +361,8 @@ async function main() {
         predictor: predictor.name,
         inference: inference.getStats(),
         predictionStats,
+        ai: { ...analyst.getStats(), gate: aiStats },
+        aiApprovals,
         predictions,
         validSignals,
         telegram: deliverer.getStats(),
@@ -278,6 +374,24 @@ async function main() {
   });
   healthServer.listen(PORT, () => {
     console.log(`🩺 Health server listening on :${PORT} (/health)`);
+  });
+  // A busy port must not take the capture engine down with it: capture is the
+  // job, /health is auxiliary. Without this handler Node's default 'error'
+  // behaviour is to throw, which crashed the whole process (observed as a
+  // restart loop when a previous instance still held :10000). Log, retry a few
+  // times, and keep capturing either way.
+  let healthRetries = 0;
+  healthServer.on('error', (e: NodeJS.ErrnoException) => {
+    if (e.code === 'EADDRINUSE' && healthRetries < 5) {
+      healthRetries++;
+      console.error(
+        `[HEALTH] port ${PORT} in use; retrying in ${healthRetries * 5}s ` +
+          `(capture continues)`
+      );
+      setTimeout(() => healthServer.listen(PORT), healthRetries * 5000).unref?.();
+    } else {
+      console.error(`[HEALTH] server error: ${e.message} — capture continues`);
+    }
   });
 
   // --- Status printer ---
@@ -310,13 +424,18 @@ async function main() {
           `base=${predictionStats.local} accepted=${predictionStats.accepted} ` +
           `rejected=${predictionStats.rejected}`
       );
+      console.log(
+        `[AI] final: analyzed=${aiStats.analyzed} approved=${aiStats.approved} ` +
+          `rejected=${aiStats.rejected} failed=${aiStats.failed}`
+      );
       // Drain any batched signals still inside the delivery window, so the
       // final bucket of a run is delivered rather than silently dropped.
       const d = deliverer.getStats();
       if (d.enabled) {
         console.log(
           `[DELIVER] final: msgs=${d.sent} signals=${d.signals} ` +
-            `failed=${d.failed} throttled=${d.throttled}`
+            `failed=${d.failed} throttled=${d.throttled} dup=${d.duplicates} ` +
+            `retries=${d.retries}`
         );
       }
     } catch (e) {

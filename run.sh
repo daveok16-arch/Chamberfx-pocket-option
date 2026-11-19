@@ -40,7 +40,11 @@ RETRAIN_LOG="$RUN_DIR/retrain.log"
 INFERENCE_PORT="${INFERENCE_PORT:-8000}"
 PORT="${PORT:-10000}"
 PERIOD="${PERIOD:-60}"
-HORIZON="${HORIZON:-180}"
+# Label horizon. Kept at 60 to match the Dockerfile and render.yaml defaults, so
+# the local and deployed stacks train on the same prediction problem. A horizon
+# change invalidates the existing signals.json (train.py refuses a mixed-horizon
+# file), so it must be a deliberate, dataset-wide decision.
+HORIZON="${HORIZON:-60}"
 RETRAIN_INTERVAL_SEC="${RETRAIN_INTERVAL_SEC:-1800}"
 
 VENV_PY="$ROOT/inference/.venv/bin/python"
@@ -82,7 +86,12 @@ supervise() {
   while [ ! -f "$RUN_DIR/stopping" ]; do
     log "$name starting"
     echo "===== $(date -u +%Y-%m-%dT%H:%M:%SZ) $name start =====" >>"$logfile"
-    setsid "$@" >>"$logfile" 2>&1 &
+    # Close the supervisor's lock descriptor (fd 9) in the child. Without this
+    # the child inherits it, and a long-lived grandchild (e.g. the retrain
+    # loop's `sleep 600`) keeps the flock held after the supervisor itself is
+    # gone — observed as "another instance is already running" with no
+    # supervisor running at all. The lock must die with the supervisor.
+    setsid bash -c 'exec 9>&-; exec "$@"' bash "$@" >>"$logfile" 2>&1 &
     local pid=$!
     echo "$pid" >"$RUN_DIR/$name.pid"
 
@@ -103,28 +112,64 @@ supervise() {
 }
 
 # ------------------------------------------------------------------ actions --
+# Stop every supervised program, then the supervisor itself.
+#
+# Each child is started with `setsid`, so it leads its OWN process group and is
+# not reachable through the supervisor's group. Killing only the supervisor's
+# group therefore left capture, uvicorn and the retrain loop running — observed
+# as "stopped" followed by a live capture engine and a held lock. Each child's
+# pid is the group leader id, so `kill -TERM -<pid>` reaches the whole tree
+# (tsx -> node, retrain -> sleep) and lets the capture engine flush on SIGTERM.
 stop_bot() {
-  if [ ! -f "$RUN_DIR/supervisor.pid" ]; then
-    log "not running"
-    return 0
+  # Re-entrancy guard: this runs from the CLI *and* from the INT/TERM trap, and
+  # the trap's own kill would otherwise re-enter it.
+  if [ -n "${STOPPING:-}" ]; then return 0; fi
+  STOPPING=1
+
+  touch "$RUN_DIR/stopping" 2>/dev/null || true
+
+  local name pid
+  for name in capture inference retrain; do
+    pid="$(cat "$RUN_DIR/$name.pid" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      log "stopping $name (pid $pid)"
+      kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+    fi
+  done
+
+  local sup
+  sup="$(cat "$RUN_DIR/supervisor.pid" 2>/dev/null || true)"
+  if [ -n "$sup" ] && kill -0 "$sup" 2>/dev/null; then
+    log "stopping supervisor $sup"
+    kill -TERM "$sup" 2>/dev/null
   fi
-  local pid
-  pid="$(cat "$RUN_DIR/supervisor.pid" 2>/dev/null || true)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    log "stopping supervisor $pid"
-    touch "$RUN_DIR/stopping"
-    # SIGTERM the whole group so children get a chance to flush (the capture
-    # engine writes its last labels on SIGTERM).
-    kill -TERM -"$(ps -o pgid= -p "$pid" | tr -d ' ')" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
-    for _ in $(seq 1 30); do
-      kill -0 "$pid" 2>/dev/null || break
-      sleep 1
+
+  # Give the children time to flush (the capture engine writes its final labels
+  # on SIGTERM), then force-kill anything still standing.
+  local i
+  for i in $(seq 1 30); do
+    local alive=0
+    for name in capture inference retrain; do
+      pid="$(cat "$RUN_DIR/$name.pid" 2>/dev/null || true)"
+      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then alive=1; fi
     done
-    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
-  else
-    log "stale pid file; cleaning up"
+    if [ -n "$sup" ] && kill -0 "$sup" 2>/dev/null; then alive=1; fi
+    [ "$alive" -eq 0 ] && break
+    sleep 1
+  done
+
+  for name in capture inference retrain; do
+    pid="$(cat "$RUN_DIR/$name.pid" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      log "$name did not exit; forcing"
+      kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+    fi
+  done
+  if [ -n "$sup" ] && kill -0 "$sup" 2>/dev/null; then
+    kill -KILL "$sup" 2>/dev/null
   fi
-  rm -f "$RUN_DIR/supervisor.pid" "$RUN_DIR/inference.pid" "$RUN_DIR/capture.pid"
+
+  rm -f "$RUN_DIR/supervisor.pid" "$RUN_DIR/inference.pid" "$RUN_DIR/capture.pid" "$RUN_DIR/retrain.pid"
   rm -f "$RUN_DIR/stopping"
   log "stopped"
 }
@@ -179,6 +224,9 @@ start_bot() {
         FEATURES_FILE="${FEATURES_FILE:-$ROOT/price-bot/live-prices.json}" \
         TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}" \
         TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}" \
+        GEMINI_API_KEY="${GEMINI_API_KEY:-${Gemini_API_Token:-}}" \
+        GEMINI_MODEL="${GEMINI_MODEL:-}" \
+        AI_MIN_CONFIDENCE="${AI_MIN_CONFIDENCE:-}" \
     bash -c "cd '$ROOT/price-bot' && exec node_modules/.bin/tsx capture.ts" &
 
   if [ "$RETRAIN_INTERVAL_SEC" -gt 0 ]; then

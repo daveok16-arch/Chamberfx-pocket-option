@@ -293,7 +293,7 @@ export class FeatureLabelCollector implements Strategy {
   private skipped = new Map<string, number>();
   /** Invoked once per bucket boundary with the freshly-armed window. */
   private onBucketClose:
-    | ((asset: string, features: FeatureWindow, entryPrice: number) => void)
+    | ((asset: string, features: FeatureWindow, entryPrice: number, entryAt: number) => void)
     | null = null;
 
   constructor(cfg: Partial<CollectorConfig> = {}) {
@@ -405,7 +405,7 @@ export class FeatureLabelCollector implements Strategy {
    * the evaluate loop).
    */
   onBucketBoundary(
-    cb: (asset: string, features: FeatureWindow, entryPrice: number) => void
+    cb: (asset: string, features: FeatureWindow, entryPrice: number, entryAt: number) => void
   ): void {
     this.onBucketClose = cb;
   }
@@ -448,7 +448,7 @@ export class FeatureLabelCollector implements Strategy {
         // inference path. Wrapped so a callback error can't break collection.
         if (this.onBucketClose) {
           try {
-            this.onBucketClose(asset, features, ctx.price);
+            this.onBucketClose(asset, features, ctx.price, now);
           } catch (e) {
             console.error(`[COLLECT] bucket callback failed for ${asset}: ${(e as Error).message}`);
           }
@@ -460,7 +460,7 @@ export class FeatureLabelCollector implements Strategy {
       }
     }
 
-    this.resolveExpired(asset, ctx.price, now);
+    this.resolveExpired(asset, buf, ctx.price, now);
     return null; // Phase 1: never proposes a trade.
   }
 
@@ -562,8 +562,23 @@ export class FeatureLabelCollector implements Strategy {
     };
   }
 
-  /** Resolve any observation whose horizon has elapsed against the live price. */
-  private resolveExpired(asset: string, currentPrice: number, now: number): void {
+  /**
+   * Resolve any observation whose horizon has elapsed.
+   *
+   * The label is the price at EXACTLY `entryAt + horizonMs`, not the price at
+   * the moment the resolve loop happened to notice. Those differ whenever the
+   * feed stalls: the server clock freezes on the last tick, then jumps when
+   * ticks resume, so `now` can be many seconds past the horizon. Labelling with
+   * `now`/current price then (a) stretches the horizon (observed 60s -> 74s on
+   * a live stall) and (b) reads the outcome off a price that is stale by the
+   * stall length — a systematically wrong label for a binary option.
+   *
+   * So resolve against the tick nearest the horizon instant and stamp
+   * `resolvedAt = entryAt + horizonMs`. The window buffer retains the full
+   * `windowMs` of ticks and the horizon equals `windowMs`, so the horizon tick
+   * is still buffered as long as resolution happens within one window of it.
+   */
+  private resolveExpired(asset: string, buf: Tick[], currentPrice: number, now: number): void {
     let i = 0;
     while (i < this.pending.length) {
       const o = this.pending[i];
@@ -572,7 +587,23 @@ export class FeatureLabelCollector implements Strategy {
         continue;
       }
 
-      const expirationPrice = currentPrice;
+      const target = o.entryAt + this.cfg.horizonMs;
+      // Nearest buffered tick to the horizon instant; falls back to the live
+      // price only if the buffer is empty.
+      let expirationPrice = currentPrice;
+      if (buf.length > 0) {
+        let best = buf[0];
+        let bestDist = Math.abs(best.timestamp - target);
+        for (const t of buf) {
+          const d = Math.abs(t.timestamp - target);
+          if (d < bestDist) {
+            best = t;
+            bestDist = d;
+          }
+        }
+        expirationPrice = best.price;
+      }
+
       const delta = expirationPrice - o.entryPrice;
       // Ties (delta === 0) resolve to DOWN: a binary option at the strike is
       // not a win, so it must not be labelled as an UP.
@@ -583,7 +614,7 @@ export class FeatureLabelCollector implements Strategy {
         asset,
         entryAt: o.entryAt,
         entryPrice: o.entryPrice,
-        resolvedAt: now,
+        resolvedAt: target,
         expirationPrice,
         delta,
         label,

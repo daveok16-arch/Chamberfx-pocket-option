@@ -137,11 +137,19 @@ export function passesVolatility(features: FeatureWindow): boolean {
  *
  * @param prediction - the `/predict` response.
  * @param features   - the 60s window that was scored.
+ * @param entryAt    - server-clock ms the window armed. Used as the signal
+ *                     timestamp so it is identical to the collector's label
+ *                     key. `features.lastTickAt` cannot be used: a tick can
+ *                     lag the boundary by a few ms, which floors into the
+ *                     PREVIOUS bucket and makes two distinct windows collide
+ *                     under one dedup key (two AUDUSD PUTs were delivered this
+ *                     way). Falls back to lastTickAt only when not supplied.
  * @returns an accepted signal payload, or the reason it was discarded.
  */
 export function evaluateSignal(
   prediction: PredictionResult,
-  features: FeatureWindow
+  features: FeatureWindow,
+  entryAt?: number
 ): FilterOutcome {
   if (!passesConfidence(prediction.probability)) {
     return {
@@ -164,7 +172,7 @@ export function evaluateSignal(
   return {
     accepted: true,
     signal: {
-      timestamp: features.lastTickAt,
+      timestamp: entryAt ?? features.lastTickAt,
       asset: prediction.asset,
       direction: prediction.direction === 1 ? 'CALL' : 'PUT',
       confidence: computeConfidence(prediction.probability),
