@@ -28,8 +28,27 @@ export WATCHDOG_INTERVAL_SEC="${WATCHDOG_INTERVAL_SEC:-30}"
 # Gemini: accept either name the environment may use.
 export GEMINI_API_KEY="${GEMINI_API_KEY:-${Gemini_API_Token:-}}"
 
+# Delivery and analysis both depend on these. A missing token does not crash the
+# engine — it just silently never delivers — so refuse to *start* instead of
+# running a bot that looks healthy and can never reach the user. `stop` and
+# `status` must keep working regardless, or a bad config could not be undone.
+require_secrets() {
+  if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+    echo "[boot] ERROR: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must both be set." >&2
+    echo "[boot] Without them the engine runs but delivers nothing." >&2
+    return 1
+  fi
+  if [ -z "${GEMINI_API_KEY:-}" ]; then
+    echo "[boot] ERROR: GEMINI_API_KEY (or Gemini_API_Token) is not set." >&2
+    echo "[boot] Without it the AI analysis gate cannot run and every signal is dropped." >&2
+    return 1
+  fi
+  return 0
+}
+
 case "${1:-start}" in
   start)
+    require_secrets || exit 1
     # `run.sh start` supervises in the FOREGROUND, so it must be detached —
     # calling it directly would block this script forever.
     if ! "$ROOT/run.sh" status >/dev/null 2>&1; then
