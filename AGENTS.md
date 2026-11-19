@@ -551,3 +551,51 @@ and `inference` stats).
 Verified: `tsc` exit 0, 187/187 checks pass (the removed baseline tests are gone;
 new tests pin that a missing model yields null, never a fabricated prediction).
 
+
+## Supervision hardening — the bot can now recover itself (2026-11-19)
+
+Observed live: the bot ran fine, then the host suspended at 02:15 and the
+process tree was killed. It stayed dead until 09:55 — ~7.5 hours of no capture,
+no predictions, no signals. The supervisor restarted crashed *children*, but
+nothing restarted the *supervisor*, and there is no cron or systemd in this
+environment (`PID 1` is `openhands-agent`), so nothing else was going to.
+
+Three real bugs surfaced while fixing this. All three produced the same
+symptom — two capture engines appending to one `signals.json` — and the first
+two were invisible to the existing checks.
+
+1. **`kill -0` succeeds on a ZOMBIE.** A hard-killed supervisor whose parent
+   does not reap it becomes `<defunct>`, and `kill -0 <pid>` still returns 0.
+   The stale pidfile therefore looked like a live supervisor forever.
+   `pid_running()` now checks `ps -o stat=` and rejects state `Z`.
+2. **`supervise` subshells inherited the lock (fd 9).** `supervise` runs as a
+   background subshell, so it held `supervisor.lock`. The child command closed
+   fd 9, but the loop itself did not — so after a `kill -9` the loop kept the
+   lock and every restart failed with "another instance is already running".
+   The loop now drops fd 9 immediately.
+3. **Orphaned `supervise` loops kept respawning engines.** Those loops are
+   children of the supervisor, so `kill -9` orphans rather than kills them. Each
+   one then restarted its child, defeating any reaping. The loop now exits when
+   its supervisor is gone (again via `pid_running`, not `kill -0`), and
+   `reap_orphans()` kills leftover loops while holding the lock — safe, because
+   holding the lock proves no other supervisor is live.
+
+Also added: `reap_orphans()` runs on every start (orphans from a hard kill are
+killed by process group, plus strays matched on command line *and* scoped to
+this checkout), and a watchdog daemon.
+
+**Watchdog.** `run.sh daemon` is a self-healing outer loop: if the supervisor
+pid is absent, or `/health` fails three consecutive probes (~90s), it restarts
+the stack detached via `setsid`. `./run.sh start-daemon` launches it;
+`./run.sh stop-all` stops it *before* the supervisor, otherwise it immediately
+restarts what was just stopped. `status` now reports the watchdog too.
+
+**`boot.sh`** is the one-command entry point: starts the supervisor detached
+(it supervises in the foreground, so calling it directly would block), then the
+watchdog, with the project's live settings (`HORIZON=60`, `SIGNAL_COOLDOWN_MS=0`,
+`RETRAIN_INTERVAL_SEC=600`). Secrets come from the environment and are never
+written to disk.
+
+Verified by `kill -9` of the supervisor: recovered in ~25s with a new supervisor
+pid and exactly one capture and one uvicorn process (previously 2 capture
+processes). `tsc` exit 0, 187/187 checks pass.

@@ -57,6 +57,32 @@ mkdir -p "$RUN_DIR"
 
 log() { echo "[supervisor] $*"; }
 
+# True liveness check. `kill -0` succeeds for a ZOMBIE (a reaped-but-not-yet-
+# collected child), so a supervisor killed while its parent still lives looks
+# alive forever — which is exactly how a stale pidfile defeated the watchdog.
+# A process is only "running" if it exists AND is not in state Z.
+pid_running() {
+  local pid="$1" state
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')"
+  [ -n "$state" ] || return 1
+  case "$state" in
+    Z*|*Z*) return 1 ;;
+  esac
+  return 0
+}
+
+# The supervisor pid, but only if that pid is genuinely alive and is one of our
+# run.sh processes (a recycled pid must not be mistaken for the supervisor).
+live_supervisor_pid() {
+  local pid
+  pid="$(cat "$RUN_DIR/supervisor.pid" 2>/dev/null || true)"
+  pid_running "$pid" || return 1
+  ps -o cmd= -p "$pid" 2>/dev/null | grep -q "run.sh" || return 1
+  echo "$pid"
+}
+
 # Block until the inference service reports a loaded model, or the deadline
 # passes. The engine has no baseline fallback, so starting capture before the
 # model is served would collect the first buckets without predicting them.
@@ -73,6 +99,76 @@ wait_for_model() {
   done
   log "warn: no model served after ${tries}s — starting capture anyway (COLLECT-ONLY until a model appears)"
   return 1
+}
+
+# Kill any engine/inference/retrain process left over from a previous
+# supervisor. Called only while holding the lock, so nothing here is "current".
+reap_orphans() {
+  local name pid found=0
+
+  # 1. Anything recorded in our own pidfiles.
+  for name in capture inference retrain; do
+    pid="$(cat "$RUN_DIR/$name.pid" 2>/dev/null || true)"
+    if pid_running "$pid"; then
+      log "reaping orphan $name (pid $pid)"
+      kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+      found=1
+    fi
+  done
+
+  # 2. Strays the pidfiles missed (a crash between spawn and write, or a
+  #    manually launched engine). Matched by full command line, scoped to this
+  #    checkout so an unrelated process on the host is never touched.
+  local pat
+  for pat in "tsx capture.ts" "uvicorn app:app" "retrain-loop.sh"; do
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      pid_running "$pid" || continue
+      grep -qa "$ROOT" "/proc/$pid/cmdline" 2>/dev/null || continue
+      log "reaping stray ${pat} (pid $pid)"
+      kill -TERM "$pid" 2>/dev/null
+      found=1
+    done < <(pgrep -f "$pat" 2>/dev/null || true)
+  done
+
+  # 3. Orphaned `supervise` loops from a dead supervisor. These are the loops
+  #    that RESPAWN children, so leaving one alive undoes everything above: it
+  #    starts a fresh engine the moment we kill the old one, which is how two
+  #    capture processes appeared. Safe to kill because we hold the lock, so any
+  #    other `run.sh start` process is by definition not a live supervisor.
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    [ "$pid" = "$$" ] && continue
+    pid_running "$pid" || continue
+    grep -qa "$ROOT" "/proc/$pid/cmdline" 2>/dev/null || continue
+    log "reaping orphan supervise loop (pid $pid)"
+    kill -KILL "$pid" 2>/dev/null
+    found=1
+  done < <(pgrep -f "run.sh start" 2>/dev/null || true)
+
+  if [ "$found" -eq 1 ]; then
+    # Give them a moment to flush, then force anything still standing.
+    local i
+    for i in $(seq 1 10); do
+      local alive=0
+      for name in capture inference retrain; do
+        pid="$(cat "$RUN_DIR/$name.pid" 2>/dev/null || true)"
+        pid_running "$pid" && alive=1
+      done
+      [ "$alive" -eq 0 ] && break
+      sleep 1
+    done
+    for name in capture inference retrain; do
+      pid="$(cat "$RUN_DIR/$name.pid" 2>/dev/null || true)"
+      if pid_running "$pid"; then
+        log "orphan $name did not exit; forcing"
+        kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+      fi
+    done
+    sleep 1
+  fi
+
+  rm -f "$RUN_DIR/capture.pid" "$RUN_DIR/inference.pid" "$RUN_DIR/retrain.pid"
 }
 
 # ---------------------------------------------------------------- preflight --
@@ -114,7 +210,29 @@ supervise() {
   shift 2
   local backoff=2
 
+  # This function runs as a background subshell (`supervise ... &`), so it
+  # inherits the supervisor's lock descriptor (fd 9) and, because it is a child
+  # of the supervisor, it also survives when the supervisor is killed with -9.
+  # It would then hold the lock forever and every restart would fail with
+  # "another instance is already running". Drop the descriptor here; only the
+  # supervisor process itself may hold it.
+  exec 9>&-
+
+  # Remember the supervisor pid. If it dies without running its trap (kill -9,
+  # host suspend), this loop would otherwise keep restarting children forever
+  # as an orphan, repopulating engines no supervisor is tracking.
+  local parent=$$
+
   while [ ! -f "$RUN_DIR/stopping" ]; do
+    # pid_running, not `kill -0`: a hard-killed supervisor whose parent does
+    # not reap it becomes a ZOMBIE, and `kill -0` still succeeds on a zombie.
+    # That made orphaned loops believe their supervisor was alive and keep
+    # respawning engines nobody tracked.
+    if ! pid_running "$parent"; then
+      log "$name: supervisor gone; stopping child"
+      echo "===== $name orphaned (supervisor gone) =====" >>"$logfile"
+      return 0
+    fi
     log "$name starting"
     echo "===== $(date -u +%Y-%m-%dT%H:%M:%SZ) $name start =====" >>"$logfile"
     # Close the supervisor's lock descriptor (fd 9) in the child. Without this
@@ -162,7 +280,7 @@ stop_bot() {
   local name pid
   for name in capture inference retrain; do
     pid="$(cat "$RUN_DIR/$name.pid" 2>/dev/null || true)"
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    if pid_running "$pid"; then
       log "stopping $name (pid $pid)"
       kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
     fi
@@ -170,7 +288,7 @@ stop_bot() {
 
   local sup
   sup="$(cat "$RUN_DIR/supervisor.pid" 2>/dev/null || true)"
-  if [ -n "$sup" ] && kill -0 "$sup" 2>/dev/null; then
+  if pid_running "$sup"; then
     log "stopping supervisor $sup"
     kill -TERM "$sup" 2>/dev/null
   fi
@@ -182,21 +300,21 @@ stop_bot() {
     local alive=0
     for name in capture inference retrain; do
       pid="$(cat "$RUN_DIR/$name.pid" 2>/dev/null || true)"
-      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then alive=1; fi
+      if pid_running "$pid"; then alive=1; fi
     done
-    if [ -n "$sup" ] && kill -0 "$sup" 2>/dev/null; then alive=1; fi
+    if pid_running "$sup"; then alive=1; fi
     [ "$alive" -eq 0 ] && break
     sleep 1
   done
 
   for name in capture inference retrain; do
     pid="$(cat "$RUN_DIR/$name.pid" 2>/dev/null || true)"
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    if pid_running "$pid"; then
       log "$name did not exit; forcing"
       kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
     fi
   done
-  if [ -n "$sup" ] && kill -0 "$sup" 2>/dev/null; then
+  if pid_running "$sup"; then
     kill -KILL "$sup" 2>/dev/null
   fi
 
@@ -207,8 +325,8 @@ stop_bot() {
 
 status_bot() {
   local pid
-  pid="$(cat "$RUN_DIR/supervisor.pid" 2>/dev/null || true)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+  pid="$(live_supervisor_pid 2>/dev/null || true)"
+  if [ -n "$pid" ]; then
     log "supervisor running (pid $pid)"
     curl -sf "http://127.0.0.1:$INFERENCE_PORT/health" >/dev/null 2>&1 \
       && log "inference: up on :$INFERENCE_PORT" \
@@ -216,6 +334,9 @@ status_bot() {
     curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 \
       && log "capture:   up on :$PORT" \
       || log "capture:   DOWN"
+    local wd
+    wd="$(pgrep -f "run.sh daemon" 2>/dev/null | head -1)"
+    [ -n "$wd" ] && log "watchdog:  running (pid $wd)" || log "watchdog:  NOT running (./run.sh start-daemon)"
   else
     log "not running"
     return 1
@@ -232,6 +353,14 @@ start_bot() {
     log "another instance is already running (see: ./run.sh status)"
     return 1
   fi
+
+  # Holding the lock proves no other supervisor is running. So any child still
+  # alive from a previous incarnation is an ORPHAN: a hard-killed supervisor
+  # (kill -9, host suspend) cannot run its trap, and its `setsid` children
+  # outlive it. Restarting without reaping them yields two capture engines
+  # appending to one signals.json — observed as 2 capture.ts processes. Reap
+  # before starting anything.
+  reap_orphans
 
   echo "$$" >"$RUN_DIR/supervisor.pid"
   rm -f "$RUN_DIR/stopping"
@@ -273,11 +402,84 @@ start_bot() {
   wait
 }
 
+# ------------------------------------------------------------------- daemon --
+# Self-healing outer loop.
+#
+# `start_bot` already restarts crashed CHILDREN, but nothing restarts the
+# supervisor itself. When the host is suspended or the supervisor is killed
+# outright, the bot stays dead until a human notices — observed as a 7.5h outage
+# after the sandbox suspended at 02:15. This loop is the missing layer: it
+# re-invokes `start` whenever the supervisor is gone or the health endpoint
+# stops answering, and it is safe to run because `start` is idempotent (flock).
+daemon_loop() {
+  local interval="${WATCHDOG_INTERVAL_SEC:-30}"
+  local log="$RUN_DIR/watchdog.log"
+  local unhealthy=0
+
+  log "watchdog running (interval ${interval}s, log ${log})"
+  echo "===== $(date -u +%Y-%m-%dT%H:%M:%SZ) watchdog start =====" >>"$log"
+
+  while true; do
+    if [ -f "$RUN_DIR/daemon.stop" ]; then
+      log "watchdog stopping (daemon.stop present)"
+      echo "===== $(date -u +%Y-%m-%dT%H:%M:%SZ) watchdog stop =====" >>"$log"
+      return 0
+    fi
+
+    local sup
+    sup="$(live_supervisor_pid 2>/dev/null || true)"
+
+    if [ -z "$sup" ]; then
+      log "watchdog: supervisor not running — starting"
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) supervisor absent; starting" >>"$log"
+      unhealthy=0
+      # setsid so the restarted supervisor does not die with this watchdog.
+      setsid nohup "$0" start >>"$log" 2>&1 < /dev/null &
+      # Give start_bot time to take the lock and bring children up before the
+      # next probe, so one restart is not mistaken for a crash loop.
+      sleep "$interval"
+      continue
+    fi
+
+    # Supervisor alive: also require the engine's health endpoint. A capture
+    # process that hangs without exiting would otherwise look healthy forever.
+    if curl -sf -m 5 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+      unhealthy=0
+    else
+      unhealthy=$(( unhealthy + 1 ))
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) health probe failed (${unhealthy}/3)" >>"$log"
+      # Three consecutive failures (>=90s at the default) before acting, so a
+      # slow tick or a brief reconnect does not trigger a restart.
+      if [ "$unhealthy" -ge 3 ]; then
+        log "watchdog: /health unresponsive ${unhealthy}x — restarting"
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) unhealthy x${unhealthy}; restarting" >>"$log"
+        # setsid + detached, so the recovery does not depend on this watchdog
+        # staying alive through the restart.
+        setsid nohup bash -c "'$0' stop; sleep 3; exec '$0' start" >>"$log" 2>&1 < /dev/null &
+        unhealthy=0
+        sleep "$interval"
+        continue
+      fi
+    fi
+
+    sleep "$interval"
+  done
+}
+
 case "${1:-start}" in
-  start)  start_bot ;;
-  stop)   stop_bot ;;
-  status) status_bot ;;
-  logs)   tail -n 40 -f "$CAPTURE_LOG" "$INFERENCE_LOG" ;;
+  start)   start_bot ;;
+  stop)    stop_bot ;;
+  status)  status_bot ;;
+  logs)    tail -n 40 -f "$CAPTURE_LOG" "$INFERENCE_LOG" ;;
   restart) stop_bot; sleep 2; start_bot ;;
-  *) echo "usage: $0 {start|stop|status|logs|restart}"; exit 2 ;;
+  daemon)  daemon_loop ;;
+  # Stop the watchdog first, otherwise it immediately restarts what `stop` just
+  # killed.
+  stop-all) touch "$RUN_DIR/daemon.stop"; sleep 1; stop_bot ;;
+  start-daemon)
+    rm -f "$RUN_DIR/daemon.stop"
+    setsid nohup "$0" daemon >>"$RUN_DIR/watchdog.log" 2>&1 < /dev/null &
+    echo "[supervisor] watchdog started (pid $!)"
+    ;;
+  *) echo "usage: $0 {start|stop|restart|status|logs|daemon|start-daemon|stop-all}"; exit 2 ;;
 esac
