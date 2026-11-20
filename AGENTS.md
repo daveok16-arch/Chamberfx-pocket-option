@@ -364,6 +364,22 @@ counterpart to `deploy/supervisord.conf`.
   `HORIZON=60` against a file of 180s labels appends mixed-horizon rows, and
   `train.py` refuses the file (by design). Keep `HORIZON` aligned with the
   existing `signals.json`.
+- **Brier alone is not a sufficient guard — the gate can be silenced while
+  Brier improves (2026-11-20).** `_calibrator_improves_brier` accepted a Platt
+  map that compressed served probabilities to `[0.4178, 0.4711]`, so **0 of
+  1578 rows** could clear the 0.65 gate. The engine ran, `/health` reported
+  `connected: true`, and it was mathematically incapable of ever emitting a
+  signal, while `train.py` printed the map as an improvement. Cause: Brier is
+  minimised by predicting the base rate, so squashing every score toward ~0.5
+  scores *better* than a model that actually discriminates — the guard was
+  rewarding the exact failure it exists to prevent. `_preserves_signal_range`
+  now requires the mapped scores to reach the gate. It deliberately does not
+  compare raw-vs-mapped reachability: when the raw slice is itself too weak to
+  reach the gate that comparison is vacuous and a collapsing map slips through
+  (the first version of the fix had that hole, and the end-to-end test caught
+  it). Verified: the guard rejects the exact calibrator that was live, the
+  retrained model serves raw probabilities, and the live service now spans
+  `0.34..0.63` with 3/120 rows clearing the gate.
 - **Calibration is now gated on whether it actually helps — the Platt map alone
   reintroduced silence.** Switching isotonic → Platt removed the 0/1 saturation
   but not the underlying failure mode: Platt is a monotone *squashing* map, and
