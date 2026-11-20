@@ -384,6 +384,12 @@ def _calibrator_improves_brier(
     no-trade zone — every window then reads ~0.5 and the engine goes
     permanently silent. It was measured doing exactly that. Calibration is only
     worth keeping when it demonstrably improves the held-out Brier score.
+
+    Brier alone is not sufficient (see `_preserves_signal_range`): Brier is
+    minimised by predicting the base rate, so a map that squashes every score to
+    ~0.45 scores better than a model that actually discriminates. On a small
+    slice that is a lower Brier *and* total signal loss, so the caller must also
+    require the map to keep the scores spread enough to clear the gate.
     """
     n = len(y_cal)
     if n < 8:
@@ -414,8 +420,44 @@ def _calibrator_improves_brier(
     return cal_brier < raw_brier, raw_brier, cal_brier
 
 
+def _preserves_signal_range(
+    raw_cal: np.ndarray, calibrator: Any, min_confidence: float
+) -> tuple[bool, str]:
+    """Reject a calibrator that would make the confidence gate unreachable.
+
+    The downstream filter only acts on `max(P, 1-P) >= min_confidence`. A
+    monotone map that squashes every raw score into a narrow band around the
+    base rate keeps ranking intact (AUC unchanged) and can even improve Brier,
+    while making that gate mathematically unreachable — the engine then runs
+    forever, looks healthy, and emits nothing.
+
+    The test is whether the *calibrated* scores can still reach the gate at all.
+    Comparing against the raw scores is not enough: if the raw slice is itself
+    too weak to reach the gate, the comparison is vacuous and a collapsing map
+    passes unnoticed. Requiring the mapped scores to reach the gate is the
+    conservative direction in every case — when the model is too weak to clear
+    the gate anyway, calibration adds no value and only adds the risk of
+    masking that fact.
+    """
+    mapped = np.clip(calibrator.predict(raw_cal), 0.0, 1.0)
+    mapped_conf = np.maximum(mapped, 1.0 - mapped)
+
+    if float(mapped_conf.max()) >= min_confidence:
+        return True, ""
+    return False, (
+        f"Platt rejected: it compresses probabilities to "
+        f"[{mapped.min():.4f}, {mapped.max():.4f}], which cannot reach the "
+        f"{min_confidence:.2f} confidence gate - using raw probabilities"
+    )
+
+
 def _fit_calibrated(
-    X_tr: np.ndarray, y_tr: np.ndarray, X_cal: np.ndarray, y_cal: np.ndarray, seed: int
+    X_tr: np.ndarray,
+    y_tr: np.ndarray,
+    X_cal: np.ndarray,
+    y_cal: np.ndarray,
+    seed: int,
+    min_confidence: float = DEFAULT_MIN_CONFIDENCE,
 ) -> tuple[RandomForestClassifier, Any, str]:
     """Fit the forest, then a Platt (sigmoid) map on a purged calibration slice.
 
@@ -461,6 +503,14 @@ def _fit_calibrated(
             f"Platt rejected: slope {calibrator.coef:.4f} is not positive "
             "(would invert the model's direction) - using raw probabilities"
         )
+
+    # Brier is minimised by predicting the base rate, so the check above can
+    # accept a map that squashes every score into the no-trade zone. That is
+    # invisible to ranking metrics and fatal downstream: the gate becomes
+    # unreachable and the engine emits nothing forever.
+    ok, why = _preserves_signal_range(raw, calibrator, min_confidence)
+    if not ok:
+        return model, None, why
 
     return model, calibrator, (
         f"Platt (sigmoid) fitted on {len(y_cal)} purged row(s); out-of-fold Brier "
@@ -634,7 +684,12 @@ def train(
         fit_idx, cal_idx = train_idx[:cut], train_idx[cut:]
 
         model, calibrator, calib_note = _fit_calibrated(
-            ds.X[fit_idx], ds.y[fit_idx], ds.X[cal_idx], ds.y[cal_idx], seed
+            ds.X[fit_idx],
+            ds.y[fit_idx],
+            ds.X[cal_idx],
+            ds.y[cal_idx],
+            seed,
+            min_confidence,
         )
         print(f"[calib] {calib_note}")
 

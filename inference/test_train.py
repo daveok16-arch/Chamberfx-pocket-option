@@ -25,6 +25,7 @@ from model_bundle import PlattCalibrator
 from train import (
     Dataset,
     _calibrator_improves_brier,
+    _preserves_signal_range,
     _fit_calibrated,
     _report_block_null,
     chronological_split,
@@ -508,6 +509,81 @@ class TestCalibratorIsRejectedWhenItHurts(unittest.TestCase):
                 float(np.corrcoef(cal, y[120:180])[0, 1]),
                 0.0,
                 "persisted calibrator inverted the model's direction",
+            )
+
+
+class TestCalibratorCannotSilenceTheGate(unittest.TestCase):
+    """A calibrator must not make the confidence gate unreachable.
+
+    Brier score is minimised by predicting the base rate, so a Platt map that
+    squashes every score into a narrow band around ~0.5 can *improve* Brier
+    while making `max(P, 1-P) >= min_confidence` mathematically unreachable.
+    Ranking metrics do not see this: AUC is unchanged by a monotone map. The
+    engine then runs forever, reports healthy, and emits nothing.
+
+    This was found live: a persisted calibrator compressed served
+    probabilities to [0.4178, 0.4711], so 0 of 1578 rows could clear the 0.65
+    gate, while `train.py` had reported it as an improvement.
+    """
+
+    def test_compressing_calibrator_is_rejected(self):
+        rng = np.random.default_rng(0)
+        # Raw scores that comfortably straddle the gate.
+        raw = np.concatenate([rng.uniform(0.20, 0.45, 40), rng.uniform(0.55, 0.80, 40)])
+        y = (raw > 0.5).astype(int)
+
+        # A very flat Platt map: squashes everything toward ~0.45.
+        flat = PlattCalibrator(coef=0.05, intercept=-0.2)
+        mapped = np.clip(flat.predict(raw), 0, 1)
+        self.assertLess(
+            float(np.max(np.maximum(mapped, 1 - mapped))),
+            0.65,
+            "test setup: the map should be unable to reach the gate",
+        )
+
+        ok, why = _preserves_signal_range(raw, flat, 0.65)
+        self.assertFalse(ok, "a gate-silencing calibrator must be rejected")
+        self.assertIn("cannot reach", why)
+
+    def test_usable_calibrator_is_kept(self):
+        rng = np.random.default_rng(1)
+        raw = np.concatenate([rng.uniform(0.20, 0.45, 40), rng.uniform(0.55, 0.80, 40)])
+        # A steep, monotone-increasing map that preserves reachability.
+        usable = PlattCalibrator(coef=4.0, intercept=-0.2)
+        ok, why = _preserves_signal_range(raw, usable, 0.65)
+        self.assertTrue(ok, f"a map that can still reach the gate must be kept: {why}")
+
+    def test_calibrator_that_cannot_reach_gate_is_rejected_even_when_raw_cannot(self):
+        """The check must not be vacuous when the raw slice is weak.
+
+        Comparing calibrated-vs-raw reachability passes trivially when neither
+        can reach the gate. Requiring the mapped scores to reach it is the
+        conservative direction and catches the collapse in that case too.
+        """
+        rng = np.random.default_rng(3)
+        raw = rng.uniform(0.45, 0.55, 80)  # too weak to reach 0.65 on its own
+        flat = PlattCalibrator(coef=0.05, intercept=-0.1)
+        ok, _ = _preserves_signal_range(raw, flat, 0.65)
+        self.assertFalse(ok, "a map that cannot reach the gate must be rejected")
+
+    def test_fit_calibrated_refuses_to_silence_the_gate(self):
+        """End-to-end: the fitter drops a map that would silence the engine."""
+        rng = np.random.default_rng(2)
+        n = 120
+        X = rng.normal(size=(n, len(FEATURE_NAMES)))
+        # A weak, near-random relationship: exactly the regime where a Platt
+        # map compresses hardest.
+        y = (rng.uniform(size=n) > 0.5).astype(int)
+
+        model, calibrator, note = _fit_calibrated(
+            X[:70], y[:70], X[70:], y[70:], seed=0, min_confidence=0.65
+        )
+        if calibrator is not None:
+            mapped = np.clip(calibrator.predict(model.predict_proba(X)[:, 1]), 0, 1)
+            reachable = float(np.max(np.maximum(mapped, 1 - mapped))) >= 0.65
+            self.assertTrue(
+                reachable,
+                f"fitter returned a calibrator that cannot reach the gate; note={note}",
             )
 
 

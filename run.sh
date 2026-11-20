@@ -478,8 +478,16 @@ case "${1:-start}" in
   stop-all) touch "$RUN_DIR/daemon.stop"; sleep 1; stop_bot ;;
   start-daemon)
     rm -f "$RUN_DIR/daemon.stop"
-    setsid nohup "$0" daemon >>"$RUN_DIR/watchdog.log" 2>&1 < /dev/null &
-    echo "[supervisor] watchdog started (pid $!)"
+    # Without this guard every `boot.sh start` (and every watchdog-driven
+    # recovery, which calls `start` again) adds another watchdog. Two watchdogs
+    # both restart the stack, which is how a duplicate engine appears even
+    # though the supervisor itself is locked.
+    if pgrep -f "run.sh daemon" >/dev/null 2>&1; then
+      echo "[supervisor] watchdog already running (pid $(pgrep -f "run.sh daemon" | head -1))"
+    else
+      setsid nohup "$0" daemon >>"$RUN_DIR/watchdog.log" 2>&1 < /dev/null &
+      echo "[supervisor] watchdog started (pid $!)"
+    fi
     ;;
   *) echo "usage: $0 {start|stop|restart|status|logs|daemon|start-daemon|stop-all}"; exit 2 ;;
 esac
