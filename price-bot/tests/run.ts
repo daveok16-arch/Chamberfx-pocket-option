@@ -950,6 +950,59 @@ section('engine — session merge and liveness watchdog');
 }
 
 // ============================================================
+section('engine — reconnect storm guard (session reuse + staleness)');
+// ============================================================
+{
+  // Observed live: connect() rediscovered on EVERY reconnect, launching a
+  // headless browser each time (198 launches in minutes). The broker then
+  // closed sockets (1005) immediately after auth, so the bot never recovered.
+  const bot: any = new PocketOptionPriceBot({
+    defaultAssets: ['EURUSD_otc'],
+    candlePeriod: 60,
+    verbose: false,
+  });
+  check('no usable session before discovery', !(bot.discoveredWsUrl && bot.cachedAuthPacket));
+
+  bot.adoptDiscoveredSession({
+    url: 'wss://try-demo-eu.po.market/socket.io/?EIO=4&transport=websocket',
+    authPacket: '42["auth",{"token":"good"}]',
+    cookies: 'sid=abc',
+  });
+  check('usable session after adoption', Boolean(bot.discoveredWsUrl && bot.cachedAuthPacket));
+
+  // Three sockets that die almost immediately invalidate the credentials, so
+  // a stale token cannot loop forever without one rediscovery attempt.
+  const dieQuickly = () => {
+    bot.lastOpenAt = Date.now() - 1000; // opened 1s ago
+    bot.handleClose(1005, '');
+  };
+  dieQuickly();
+  check('cached auth kept after 1 short-lived socket', bot.cachedAuthPacket !== '');
+  dieQuickly();
+  check('cached auth kept after 2 short-lived sockets', bot.cachedAuthPacket !== '');
+  dieQuickly();
+  check('cached auth cleared after 3 short-lived sockets', bot.cachedAuthPacket === '');
+  check('ws url retained for re-dial after invalidation', bot.discoveredWsUrl.includes('po.market'));
+
+  // A socket that lived long enough is treated as healthy: no invalidation.
+  const bot2: any = new PocketOptionPriceBot({
+    defaultAssets: ['EURUSD_otc'],
+    candlePeriod: 60,
+    verbose: false,
+  });
+  bot2.adoptDiscoveredSession({
+    url: 'wss://try-demo-eu.po.market/socket.io/?EIO=4&transport=websocket',
+    authPacket: '42["auth",{"token":"good"}]',
+    cookies: '',
+  });
+  for (let i = 0; i < 5; i++) {
+    bot2.lastOpenAt = Date.now() - 60_000; // lived a minute
+    bot2.handleClose(1005, '');
+  }
+  check('healthy sockets never invalidate the session', bot2.cachedAuthPacket !== '');
+}
+
+// ============================================================
 console.log('\n' + '='.repeat(60));
 if (failures.length === 0) {
   console.log(`ALL ${passed} CHECKS PASSED`);

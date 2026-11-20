@@ -119,6 +119,10 @@ export class PocketOptionPriceBot {
   private assets: Map<string, AssetInfo> = new Map();
   private connected: boolean = false;
   private reconnectAttempts: number = 0;
+  /** Wall-clock of the last successful open, used to detect a dead session. */
+  private lastOpenAt: number = 0;
+  /** Consecutive sockets that died almost immediately after opening. */
+  private shortLivedConnections: number = 0;
   private reconnectTimeout: NodeJS.Timeout | null = null;
   
   // Discovered session data
@@ -295,14 +299,22 @@ export class PocketOptionPriceBot {
    */
   public async connect(): Promise<void> {
     try {
-      // Discover session if URL not provided
-      if (!this.config.wsUrl) {
+      // Reuse a session that already worked. Rediscovering on every reconnect
+      // spawns a headless browser per attempt, and a broker that rate-limits
+      // discovery turns that into a reconnect storm: observed live as 198
+      // browser launches in a few minutes with the socket closed (1005)
+      // immediately after auth. Discovery is only needed when there is no
+      // usable session at all, or when the cached one has clearly gone stale.
+      const haveUsableSession = Boolean(this.discoveredWsUrl && this.cachedAuthPacket);
+      if (!this.config.wsUrl && !haveUsableSession) {
         const session = await this.discoverSession();
         this.adoptDiscoveredSession(session);
-      } else {
+      } else if (this.config.wsUrl) {
         this.discoveredWsUrl = this.config.wsUrl;
         this.cachedCookies = this.config.cookies || "";
         this.cachedAuthPacket = this.config.authPacket || "";
+      } else {
+        this.log('[WS] Reusing cached session (skipping browser rediscovery)');
       }
 
       this.log(`[WS] Connecting to: ${this.discoveredWsUrl}`);
@@ -348,6 +360,7 @@ export class PocketOptionPriceBot {
   private handleOpen(): void {
     this.log("[WS] Connection opened");
     this.connected = true;
+    this.lastOpenAt = Date.now();
     this.reconnectAttempts = 0;
     this.startLivenessWatchdog();
     this.connectListeners.forEach(cb => cb());
@@ -787,6 +800,24 @@ export class PocketOptionPriceBot {
     this.log(`[WS] Connection closed (${code}): ${reason}`);
     this.stopLivenessWatchdog();
     this.connected = false;
+
+    // A socket that dies within a few seconds of opening means the cached
+    // credentials are no longer accepted. Reusing them forever would loop
+    // silently, so after a few such failures the session is invalidated and
+    // the next connect() rediscovers once.
+    const lived = this.lastOpenAt > 0 ? Date.now() - this.lastOpenAt : 0;
+    if (this.lastOpenAt > 0 && lived < 15000) {
+      this.shortLivedConnections++;
+      if (this.shortLivedConnections >= 3) {
+        this.log('[WS] Session rejected repeatedly — invalidating cached credentials for one rediscovery');
+        this.cachedAuthPacket = "";
+        this.shortLivedConnections = 0;
+      }
+    } else {
+      this.shortLivedConnections = 0;
+    }
+    this.lastOpenAt = 0;
+
     this.disconnectListeners.forEach(cb => cb());
     this.scheduleReconnect();
   }

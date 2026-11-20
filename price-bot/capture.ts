@@ -163,6 +163,106 @@ async function main() {
   const predictionStats = { total: 0, ml: 0, accepted: 0, rejected: 0 };
   /** AI-gate counts: what the analyst did with the filter-accepted signals. */
   const aiStats = { analyzed: 0, approved: 0, rejected: 0, failed: 0 };
+  /**
+   * Every scored window, held only until its label resolves. Volume counters
+   * (`predictionStats`) cannot distinguish a working model from a busy one, so
+   * the bot also has to report whether its calls were RIGHT.
+   */
+  const pendingScored: Array<{
+    asset: string;
+    entryAt: number;
+    direction: 'CALL' | 'PUT';
+    probability: number;
+    source: string;
+    accepted: boolean;
+  }> = [];
+  /** Resolved outcomes, newest last, capped so memory stays flat. */
+  const resolvedScored: Array<{ confidence: number; correct: boolean; accepted: boolean; source: string }> = [];
+  const MAX_RESOLVED = 20000;
+
+  /**
+   * Match scored windows to their resolved labels and record whether each call
+   * was right. Volume counters cannot tell a working model from a busy one, so
+   * this is the number that decides whether the predictor has any skill.
+   *
+   * A prediction is "correct" when its direction matched the realised label
+   * (CALL needs label 1, PUT needs label 0). Unresolved windows stay pending
+   * until their 60s horizon closes.
+   */
+  const resolveScored = () => {
+    if (pendingScored.length === 0) return;
+    const byKey = new Map<string, { label: number }>();
+    for (const rec of collector.getLabels()) {
+      byKey.set(`${rec.asset}|${rec.entryAt}`, { label: rec.label });
+    }
+    for (let i = pendingScored.length - 1; i >= 0; i--) {
+      const p = pendingScored[i];
+      const hit = byKey.get(`${p.asset}|${p.entryAt}`);
+      if (!hit) continue;
+      pendingScored.splice(i, 1);
+      const correct = p.direction === 'CALL' ? hit.label === 1 : hit.label === 0;
+      resolvedScored.push({
+        confidence: Math.max(p.probability, 1 - p.probability),
+        correct,
+        accepted: p.accepted,
+        source: p.source,
+      });
+    }
+    if (resolvedScored.length > MAX_RESOLVED) {
+      resolvedScored.splice(0, resolvedScored.length - MAX_RESOLVED);
+    }
+  };
+
+  /** Aggregate resolved outcomes into the skill report served on /health. */
+  const skillReport = ():
+    | { resolved: 0; note: string }
+    | {
+        resolved: number;
+        accuracy: number;
+        wilson95: [number, number];
+        breakEvenAt92Payout: number;
+        byConfidence: Record<string, { n: number; accuracy?: number }>;
+        filterAccepted: { n: number; accuracy?: number };
+        pending: number;
+      } => {
+    const n = resolvedScored.length;
+    if (n === 0) return { resolved: 0, note: 'no resolved predictions yet' };
+    const wins = resolvedScored.filter((r) => r.correct).length;
+    const acc = wins / n;
+    // Wilson interval: the honest way to report a proportion this close to 0.5
+    // on a small sample, and what makes a fluke look like a fluke.
+    const z = 1.96;
+    const denom = 1 + (z * z) / n;
+    const centre = (acc + (z * z) / (2 * n)) / denom;
+    const half = (z * Math.sqrt((acc * (1 - acc)) / n + (z * z) / (4 * n * n))) / denom;
+    const bucket = (lo: number, hi: number) => {
+      const g = resolvedScored.filter((r) => r.confidence >= lo && r.confidence < hi);
+      if (g.length === 0) return { n: 0 };
+      return { n: g.length, accuracy: +(g.filter((r) => r.correct).length / g.length).toFixed(4) };
+    };
+    const acc_g = resolvedScored.filter((r) => r.accepted);
+    return {
+      resolved: n,
+      accuracy: +acc.toFixed(4),
+      wilson95: [+(centre - half).toFixed(4), +(centre + half).toFixed(4)],
+      breakEvenAt92Payout: 0.5208,
+      // A confidence band that does not rise with confidence means the model's
+      // probability is decorative — the gate is then selecting noise.
+      byConfidence: {
+        '0.50-0.60': bucket(0.5, 0.6),
+        '0.60-0.70': bucket(0.6, 0.7),
+        '0.70-0.80': bucket(0.7, 0.8),
+        '0.80-1.00': bucket(0.8, 1.01),
+      },
+      filterAccepted: acc_g.length
+        ? {
+            n: acc_g.length,
+            accuracy: +(acc_g.filter((r) => r.correct).length / acc_g.length).toFixed(4),
+          }
+        : { n: 0 },
+      pending: pendingScored.length,
+    };
+  };
 
   const deliverer = new TelegramDeliverer({
     auditFile: process.env.TELEGRAM_AUDIT_FILE ?? path.join(path.dirname(signalsFile), 'telegram-audit.jsonl'),
@@ -208,10 +308,14 @@ async function main() {
 
     // The prediction object is journaled as received, never rewritten, so the
     // original source prediction can always be compared against the verdict.
+    // `features` is the exact window the analyst judged: without it, any
+    // post-hoc audit has to re-derive features from signals.json by joining on
+    // (asset, entryAt), which silently drops rows that never resolved.
     const base = {
       at: new Date().toISOString(),
       signal,
       prediction,
+      features,
     };
 
     if (!analysis) {
@@ -261,6 +365,19 @@ async function main() {
         // Phase 3: gate the raw prediction. A rejection is normal operation,
         // not an error — it only means the window was not tradeable.
         const outcome = evaluateSignal(result, features, entryAt);
+
+        // Record the scored window before any gating, so the skill tracker
+        // measures the raw model, not just the survivors of the filter.
+        pendingScored.push({
+          asset,
+          entryAt,
+          direction: result.direction === 1 ? 'CALL' : 'PUT',
+          probability: result.probability,
+          source: result.source ?? 'unknown',
+          accepted: outcome.accepted,
+        });
+        resolveScored();
+
         if (!outcome.accepted) {
           predictionStats.rejected++;
           console.log(`[SIGNAL_FILTER] Signal discarded: ${outcome.detail}`);
@@ -325,12 +442,18 @@ async function main() {
   const writeTimer = setInterval(() => {
     collectAll();     // ensure features are current before snapshotting
     writeOutputs();
+    resolveScored();  // resolve outcomes even when no new window is scored
     const s = collector.getStats();
     const d = deliverer.getStats();
+    const sk = skillReport();
     console.log(
       `[COLLECT] labels=${s.labels} pending=${s.pending} assets=${s.assets} skipped=${s.skipped}` +
         ` | predictions total=${predictionStats.total} ml=${predictionStats.ml}` +
         ` | signals accepted=${predictionStats.accepted} rejected=${predictionStats.rejected}` +
+        ` | skill resolved=${sk.resolved}` +
+        ('accuracy' in sk
+          ? ` acc=${(sk.accuracy * 100).toFixed(1)}% ci=[${sk.wilson95.map((x) => (x * 100).toFixed(1)).join(',')}]`
+          : '') +
         ` | ai analyzed=${aiStats.analyzed} approved=${aiStats.approved}` +
         ` rejected=${aiStats.rejected} failed=${aiStats.failed}` +
         (d.enabled
@@ -361,6 +484,7 @@ async function main() {
         predictor: predictor.name,
         inference: inference.getStats(),
         predictionStats,
+        skill: skillReport(),
         ai: { ...analyst.getStats(), gate: aiStats },
         aiApprovals,
         predictions,
