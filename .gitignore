@@ -35,3 +35,6 @@ Thumbs.db
 
 # Local supervisor runtime (logs, pids, lock) — see run.sh
 run/
+
+# Automation build output (rebuild with automation/build.sh)
+automation/automation.tar.gz

@@ -660,3 +660,52 @@ it carries has no demonstrated skill. The gate and the filter are therefore
 doing their job by staying closed. Do not loosen the confidence threshold or the
 no-trade zone to manufacture signals — that converts a working safety system into
 a loss generator at a 0.92 payout, where break-even is 52.08%.
+
+## Unattended operation
+
+Two deployment paths exist. They are not equivalent.
+
+- **`run.sh start`** — local supervisor: inference + capture + retrain loop, a
+  PID lock (two engines sharing one `signals.json` would double-append), and a
+  watchdog. Data persists on local disk. This is the path that runs
+  *continuously* and accumulates the dataset.
+- **`automation/`** — an OpenHands Automation (cron `0 */4 * * *`, 21-minute
+  runs) that rebuilds the whole stack in a throwaway sandbox. See
+  `automation/README.md`.
+
+Automation constraints, probed from inside a real run rather than assumed:
+
+- `/workspace/project` **does not persist** between runs, the KV store caps at
+  ~10 KB (413 above), and `git push` from a run is refused ("authentication is
+  not supported for Git operations") while the stored `GITHUB_TOKEN` returns
+  401. So there is no writable place to carry a 2 MB dataset between runs.
+  The runner therefore ships `model.pkl` plus the most recent 1500 labels inside
+  the tarball and restores them at startup.
+- The tarball limit is 1 MB. `automation/build.sh` enforces it and trims the
+  dataset; rebuild it after retraining or the deployed model keeps serving the
+  old weights.
+- **There is a `daily_sandbox_limit`.** Six probe runs plus real runs exhausted
+  it in one day, after which dispatches return `SKIPPED` with
+  `kind: daily_sandbox_limit`. The 4-hourly schedule exists to stay under it.
+- A run's logs die with its sandbox. The runner posts a per-run summary to
+  Telegram (predictions / AI verdicts / delivery counts) and sends a
+  `⚠️ OTC bot run FAILED` message with the failing phase, so a broken run is
+  visible instead of silent.
+
+**Verified on the automation path:** two runs completed the full 21-minute
+window (21:37→21:58 and 22:00→22:21), the second fired by cron with no manual
+dispatch, and a later 8-minute run completed end to end. **Not verified:**
+whether ticks actually streamed inside those cloud sandboxes. The evidence died
+with the sandbox, and the diagnostic runs that would have reported it through
+the callback were blocked by the daily sandbox quota. Treat cloud-side capture as
+unproven until a run reports non-zero `predictions.total` in its Telegram
+summary.
+
+**Verified on the local path (the stronger evidence):** 114 minutes continuous,
+`connected: true`, 6 assets, 615 predictions all `source=ml`, 4 accepted by the
+filter, Gemini analyzed 4 → 1 approved / 3 rejected, 1 Telegram message, 0
+failures. The AI journal (`price-bot/ai-journal.jsonl`) holds 105 entries:
+68 REJECT / 33 APPROVE overall, and for the 60 ML-sourced ones 49 REJECT /
+11 APPROVE, with concrete cited conflicts (e.g. "net change is positive but the
+prediction is PUT", "net change is exactly zero"). The gate is demonstrably
+filtering, not rubber-stamping.
