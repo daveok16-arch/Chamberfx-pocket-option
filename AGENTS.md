@@ -615,3 +615,48 @@ written to disk.
 Verified by `kill -9` of the supervisor: recovered in ~25s with a new supervisor
 pid and exactly one capture and one uvicorn process (previously 2 capture
 processes). `tsc` exit 0, 187/187 checks pass.
+
+## Live run findings (2026-11-20)
+
+**The engine rediscovered its session on every reconnect (fixed).**
+`connect()` called `discoverSession()` whenever `config.wsUrl` was empty, and
+`discoveredWsUrl` was written but never used as a reuse guard. Every reconnect
+launched a headless Chromium to intercept a fresh auth packet. Observed live:
+198 launches in a few minutes, after which the broker closed every socket
+(`1005`) immediately after auth and the bot never recovered — `ticks` frozen,
+candles stuck at 1 per asset, while `connected` flickered true. Discovery is now
+skipped when a session that already worked is cached, and a session is
+invalidated for exactly one rediscovery after three sockets die within 15s, so a
+genuinely stale token still recovers instead of looping. 7 checks pin both
+directions. The broker's block was temporary: after a ~7 minute cooldown a fresh
+probe received ticks again.
+
+**The bot now reports its own skill (`/health.skill`).** `predictionStats`
+counted volume (total/ml/accepted/rejected), which cannot tell a working model
+from a busy one. Every scored window is held until its label resolves and
+matched on `(asset, entryAt)`; `/health` reports accuracy with a Wilson 95%
+interval, accuracy per confidence band, and the accuracy of filter-accepted
+windows against the 0.5208 break-even of a 0.92 payout. A confidence band that
+does not rise with confidence is the tell that the gate is selecting noise.
+
+**The AI journal records the exact `features` window the analyst judged.**
+Previously an audit had to re-derive features from `signals.json` by joining on
+`(asset, entryAt)`, which silently drops windows that never resolved.
+
+**The model has no measurable edge at a 60s horizon, and 0 accepted signals is
+correct behaviour, not a fault.** Walk-forward over 2,250 labelled windows:
+pooled AUC **0.5117**, inside the i.i.d. null spread `[0.4815, 0.5209]`, and the
+block (circular-shift) null gives **p=0.404**. Per-fold AUC ranged 0.474–0.579.
+The single chronological holdout reported 0.4370, which is *below* the null
+spread — noise on 440 rows, not a signal, and a reminder that one holdout is not
+a result. Mean predicted probability sits at **0.496**, so `max(P,1-P) ≈ 0.50`
+essentially never reaches the 0.65 confidence gate; the engine emitted 1 accepted
+signal in 90 windows. Filter-accepted windows resolved 0/1. Live resolved
+accuracy across 84 windows: **45.2%**, Wilson `[35.0%, 55.9%]`.
+
+This is the honest state of the pipeline: the plumbing (capture → ML scoring →
+filter → Gemini gate → Telegram) is verified end-to-end live, and the predictor
+it carries has no demonstrated skill. The gate and the filter are therefore
+doing their job by staying closed. Do not loosen the confidence threshold or the
+no-trade zone to manufacture signals — that converts a working safety system into
+a loss generator at a 0.92 payout, where break-even is 52.08%.
