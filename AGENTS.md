@@ -709,3 +709,36 @@ failures. The AI journal (`price-bot/ai-journal.jsonl`) holds 105 entries:
 11 APPROVE, with concrete cited conflicts (e.g. "net change is positive but the
 prediction is PUT", "net change is exactly zero"). The gate is demonstrably
 filtering, not rubber-stamping.
+
+## Render deployment readiness — verified by building the image (2026-11-21)
+
+The Docker image was built and run end to end, which is how both gaps below
+were found. Neither is visible by reading the config.
+
+- **The image shipped no dataset, so a fresh deploy could never predict.**
+  `signals.json` is gitignored, so a new Render disk starts empty; `train.py`
+  refuses below 621 rows and the engine has no baseline fallback, so it would
+  have collected silently for hours. The image now carries
+  `deploy/seed/signals.json` (2000 rows, 60s horizon, current schema), and
+  `deploy/entrypoint.sh` seeds the disk from it and trains a model before
+  supervisord starts. `.dockerignore` excluded `**/signals.json`, so the seed
+  needs its explicit `!deploy/seed/signals.json` negation or it is stripped at
+  build time — verify with `docker run --rm --entrypoint sh <img> -c 'ls /app/deploy/seed'`.
+- **`render.yaml` set no `GEMINI_API_KEY`.** The AI gate is fail-closed:
+  `analyze()` returns null with no key, every signal is journaled
+  `analysis-unavailable`, and `/health` still reports `connected: true`. The
+  bot looks healthy and delivers nothing. The blueprint now declares it with
+  `sync: false`, so it must be set in the dashboard.
+- **Observed in the built image:** entrypoint seeded 2000 rows, trained a
+  model, and correctly *rejected* the Platt calibrator for compressing
+  probabilities to `[0.5075, 0.5299]` — below the 0.65 gate. Serving reported
+  `predictor: ml-service`. Live: 24 predictions, all `[ML]`, 0 `[BASE]`;
+  1 accepted → `AI_APPROVE` at 75% → `[DELIVER] sent ... message #782`.
+  Evidence: `deploy/evidence/render-image-run.log`.
+- **Still unverified on Render itself:** there is no `RENDER_API_KEY` in this
+  environment and the dashboard requires an interactive login, so no deploy
+  could be triggered. The previously documented service
+  (`srv-dbacaftg1s2s73bivrt0`) no longer resolves — both candidate hostnames
+  return Render's own 404, and the GitHub repo has no Render webhook or
+  deployment records, so it is not wired to the repo. Re-creating it needs
+  dashboard access.
