@@ -73,3 +73,8 @@ services:
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
+      # The AI gate is fail-closed: without a Gemini key `analyze()` returns
+      # null, every signal is dropped as `analysis-unavailable`, and the bot
+      # looks healthy while delivering nothing. It must be set for delivery.
+      - key: GEMINI_API_KEY
+        sync: false

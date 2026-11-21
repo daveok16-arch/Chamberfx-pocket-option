@@ -48,7 +48,6 @@ RUN python3 -m venv /app/venv \
 COPY price-bot/ ./
 COPY inference/ /app/inference/
 COPY deploy/ /app/deploy/
-
 RUN chmod +x /app/deploy/entrypoint.sh /app/deploy/retrain-loop.sh
 
 # Non-root user for the app processes (supervisord itself runs as root only to

@@ -19,3 +19,8 @@ price-bot/.dockerignore
 **/__pycache__
 **/.venv
 **/.pytest_cache
+
+# Exception: the bootstrap dataset. A fresh Render disk has no signals.json, and
+# train.py refuses below 621 rows, so without this the engine would collect
+# silently for hours before it could make a single prediction.
+!deploy/seed/signals.json

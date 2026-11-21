@@ -11,6 +11,10 @@ prices.json
 ai-journal.jsonl
 telegram-audit.jsonl
 
+# The deployment seed dataset IS committed: it bootstraps training on a fresh
+# Render disk, where the gitignored runtime signals.json does not exist.
+!deploy/seed/signals.json
+
 # Archived datasets (pre-schema-fix). Kept locally for reference only; never
 # committed, and must never be mixed with current-schema data.
 price-bot/archive/

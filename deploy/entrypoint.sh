@@ -19,8 +19,20 @@ chown -R botuser:botuser "$DATA_DIR" 2>/dev/null || \
 
 # Seed an empty dataset so the collector's first read is well-formed rather
 # than relying on its missing-file path.
-if [ ! -f "${SIGNALS_FILE:-$DATA_DIR/signals.json}" ]; then
-  echo '[]' > "${SIGNALS_FILE:-$DATA_DIR/signals.json}"
+#
+# The image carries a seed dataset (deploy/seed/signals.json) because the real
+# signals.json is gitignored: without it a fresh deploy has no rows, train.py
+# refuses (it needs 621), and the engine — which has no baseline fallback —
+# would collect silently for hours before it could predict anything. The seed is
+# only a bootstrap; new observations append to it on the persistent disk.
+SIGNALS_PATH="${SIGNALS_FILE:-$DATA_DIR/signals.json}"
+if [ ! -s "$SIGNALS_PATH" ] || [ "$(cat "$SIGNALS_PATH" 2>/dev/null)" = "[]" ]; then
+  if [ -s /app/deploy/seed/signals.json ]; then
+    cp /app/deploy/seed/signals.json "$SIGNALS_PATH"
+    echo "[entrypoint] seeded dataset -> ${SIGNALS_PATH} ($(wc -c < "$SIGNALS_PATH") bytes)"
+  else
+    echo '[]' > "$SIGNALS_PATH"
+  fi
 fi
 
 # Bootstrap a model before anything starts. The engine has no baseline
